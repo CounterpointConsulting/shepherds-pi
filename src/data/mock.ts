@@ -1,0 +1,488 @@
+import type {
+  Goal,
+  Plan,
+  PlanStep,
+  AgentRun,
+  ChatMessage,
+  RunLogEntry,
+} from '../types.js';
+
+// ─── Goals ───────────────────────────────────────────────────────
+
+export const mockGoals: Goal[] = [
+  {
+    id: 'goal-001',
+    goal: 'Add user authentication with email/password to the Next.js app',
+    status: 'executing',
+    createdAt: '2026-05-02T10:15:00Z',
+    updatedAt: '2026-05-02T10:45:00Z',
+  },
+  {
+    id: 'goal-002',
+    goal: 'Fix the broken pagination on the products listing page',
+    status: 'reviewing',
+    createdAt: '2026-05-02T11:00:00Z',
+    updatedAt: '2026-05-02T11:18:00Z',
+  },
+  {
+    id: 'goal-003',
+    goal: 'Add dark mode support across the entire application',
+    status: 'planning',
+    createdAt: '2026-05-02T11:22:00Z',
+    updatedAt: '2026-05-02T11:22:00Z',
+  },
+];
+
+// ─── Plans ───────────────────────────────────────────────────────
+
+export const mockPlans: Plan[] = [
+  {
+    id: 'plan-001',
+    goalId: 'goal-001',
+    version: 1,
+    steps: [
+      {
+        id: 'step-1',
+        description: 'Design user and session schema, write migrations',
+        persona: 'dba',
+        dependsOn: [],
+        branch: 'feat/user-auth',
+        status: 'complete',
+        agentRunIds: ['dba-001', 'dba-001-rev', 'dba-002', 'dba-002-rev'],
+      },
+      {
+        id: 'step-2',
+        description: 'Build REST API for authentication endpoints',
+        persona: 'typescript-api-dev',
+        dependsOn: ['step-1'],
+        branch: 'feat/user-auth',
+        status: 'in_progress',
+        agentRunIds: ['api-001'],
+      },
+      {
+        id: 'step-3',
+        description: 'Build React components for login, registration, and password reset',
+        persona: 'typescript-react-dev',
+        dependsOn: ['step-1', 'step-2'],
+        status: 'pending',
+        agentRunIds: [],
+      },
+      {
+        id: 'step-4',
+        description: 'End-to-end testing of authentication flows',
+        persona: 'web-tester',
+        dependsOn: ['step-2', 'step-3'],
+        status: 'pending',
+        agentRunIds: [],
+      },
+      {
+        id: 'step-5',
+        description: 'Merge feature branch into dev and validate',
+        persona: 'integrator',
+        dependsOn: ['step-4'],
+        status: 'pending',
+        agentRunIds: [],
+      },
+    ],
+  },
+  {
+    id: 'plan-002',
+    goalId: 'goal-002',
+    version: 1,
+    steps: [
+      {
+        id: 'step-1',
+        description: 'Investigate pagination bug and implement fix',
+        persona: 'typescript-react-dev',
+        dependsOn: [],
+        branch: 'fix/product-pagination',
+        status: 'in_progress',
+        agentRunIds: ['react-fix-001', 'react-fix-001-rev'],
+      },
+      {
+        id: 'step-2',
+        description: 'Test pagination with various page sizes and edge cases',
+        persona: 'web-tester',
+        dependsOn: ['step-1'],
+        status: 'pending',
+        agentRunIds: [],
+      },
+    ],
+  },
+  {
+    id: 'plan-003',
+    goalId: 'goal-003',
+    version: 0,
+    steps: [],
+  },
+];
+
+// ─── Agent Runs ──────────────────────────────────────────────────
+
+export const mockAgentRuns: AgentRun[] = [
+  // Goal 001 — Step 1 (complete)
+  {
+    id: 'dba-001',
+    goalId: 'goal-001',
+    stepId: 'step-1',
+    persona: 'dba',
+    model: 'anthropic/claude-sonnet-4',
+    instructions: 'Create database migrations for user authentication. Design a users table (id, email, password_hash, created_at) and a sessions table (id, user_id, token, expires_at). Use bcrypt-compatible hashing.',
+    branch: 'feat/user-auth',
+    status: 'done',
+    result: {
+      status: 'success',
+      summary: 'Created users and sessions tables with migrations',
+      filesCreated: ['db/migrations/001_create_users.sql', 'db/migrations/002_create_sessions.sql'],
+      commits: ['Create users and sessions tables for authentication'],
+      issues: [],
+      suggestions: [],
+    },
+    startedAt: '2026-05-02T10:20:00Z',
+    completedAt: '2026-05-02T10:28:00Z',
+  },
+  {
+    id: 'dba-001-rev',
+    goalId: 'goal-001',
+    stepId: 'step-1',
+    persona: 'code-reviewer',
+    model: 'google/gemini-2.5-pro',
+    instructions: 'Review the database migrations on branch feat/user-auth. Check for: schema correctness, naming conventions, missing indexes, security considerations.',
+    branch: 'feat/user-auth',
+    status: 'done',
+    result: {
+      status: 'changes_requested',
+      summary: 'Missing index on email column, missing updated_at timestamps',
+      approved: false,
+      findings: [
+        { severity: 'warning', file: 'db/migrations/001_create_users.sql', description: 'No index on users.email column — will cause slow lookups on login', suggestion: 'Add a unique index on the email column' },
+        { severity: 'suggestion', file: 'db/migrations/001_create_users.sql', description: 'Missing updated_at timestamp column', suggestion: 'Add updated_at column with auto-update trigger' },
+      ],
+    },
+    startedAt: '2026-05-02T10:29:00Z',
+    completedAt: '2026-05-02T10:32:00Z',
+  },
+  {
+    id: 'dba-002',
+    goalId: 'goal-001',
+    stepId: 'step-1',
+    persona: 'dba',
+    model: 'anthropic/claude-sonnet-4',
+    instructions: 'The code reviewer found the following issues with your migrations:\n\n1. [WARNING] No index on the users.email column — will cause slow lookups on login. Add a unique index.\n2. [SUGGESTION] Missing updated_at timestamp column.\n\nPlease address issue #1 (required) and #2 (optional). Create a new migration file for the changes.',
+    context: 'Previous work: Created migration 001_create_users.sql (id, email, password_hash, created_at) and 002_create_sessions.sql (id, user_id, token, expires_at). Review requested email index and updated_at column.',
+    branch: 'feat/user-auth',
+    status: 'done',
+    result: {
+      status: 'success',
+      summary: 'Added email index and updated_at columns',
+      filesCreated: ['db/migrations/003_add_email_index_and_updated_at.sql'],
+      filesModified: [],
+      commits: ['Add unique index on users.email and updated_at columns'],
+      issues: [],
+      suggestions: ['Consider adding a check constraint on email format'],
+    },
+    startedAt: '2026-05-02T10:33:00Z',
+    completedAt: '2026-05-02T10:37:00Z',
+  },
+  {
+    id: 'dba-002-rev',
+    goalId: 'goal-001',
+    stepId: 'step-1',
+    persona: 'code-reviewer',
+    model: 'google/gemini-2.5-pro',
+    instructions: 'Re-review the database migrations on branch feat/user-auth after the DBA addressed previous feedback.',
+    branch: 'feat/user-auth',
+    status: 'done',
+    result: {
+      status: 'approved',
+      summary: 'All previous issues resolved. Migrations look good.',
+      approved: true,
+      findings: [
+        { severity: 'info', description: 'Email index and updated_at columns added correctly' },
+      ],
+    },
+    startedAt: '2026-05-02T10:38:00Z',
+    completedAt: '2026-05-02T10:40:00Z',
+  },
+
+  // Goal 001 — Step 2 (in progress)
+  {
+    id: 'api-001',
+    goalId: 'goal-001',
+    stepId: 'step-2',
+    persona: 'typescript-api-dev',
+    model: 'anthropic/claude-sonnet-4',
+    instructions: 'Build REST API endpoints for authentication:\n\nPOST /api/auth/register — Create new user (email, password)\nPOST /api/auth/login — Authenticate user, return session token\nPOST /api/auth/logout — Invalidate session\nPOST /api/auth/password-reset — Request password reset email\n\nUse the database schema from the migrations. Hash passwords with bcrypt. Validate input with Zod.',
+    context: 'Database schema: users (id uuid, email text unique, password_hash text, created_at timestamptz, updated_at timestamptz), sessions (id uuid, user_id uuid FK, token text, expires_at timestamptz). Email column has unique index.',
+    branch: 'feat/user-auth',
+    status: 'running',
+    startedAt: '2026-05-02T10:42:00Z',
+  },
+
+  // Goal 002 — Step 1 (in progress, under review)
+  {
+    id: 'react-fix-001',
+    goalId: 'goal-002',
+    stepId: 'step-1',
+    persona: 'typescript-react-dev',
+    model: 'anthropic/claude-sonnet-4',
+    instructions: 'The pagination on the products listing page is broken. When clicking page 2, it shows the same items as page 1. Investigate and fix the bug in the ProductsList component.',
+    branch: 'fix/product-pagination',
+    status: 'done',
+    result: {
+      status: 'success',
+      summary: 'Fixed pagination bug — offset was not being passed to the API call',
+      filesModified: ['src/components/ProductsList.tsx', 'src/hooks/useProducts.ts'],
+      commits: ['Fix pagination offset not passed to API'],
+      issues: [],
+      suggestions: ['Consider adding pagination unit tests'],
+    },
+    startedAt: '2026-05-02T11:05:00Z',
+    completedAt: '2026-05-02T11:12:00Z',
+  },
+  {
+    id: 'react-fix-001-rev',
+    goalId: 'goal-002',
+    stepId: 'step-1',
+    persona: 'code-reviewer',
+    model: 'google/gemini-2.5-pro',
+    instructions: 'Review the pagination fix on branch fix/product-pagination.',
+    branch: 'fix/product-pagination',
+    status: 'running',
+    startedAt: '2026-05-02T11:13:00Z',
+  },
+];
+
+// ─── Chat Messages ───────────────────────────────────────────────
+
+export const mockChatMessages: Record<string, ChatMessage[]> = {
+  'goal-001': [
+    {
+      id: 'msg-001',
+      goalId: 'goal-001',
+      role: 'user',
+      content: 'Add user authentication with email/password to the Next.js app',
+      timestamp: '2026-05-02T10:15:00Z',
+    },
+    {
+      id: 'msg-002',
+      goalId: 'goal-001',
+      role: 'coordinator',
+      content: "I'll help you add email/password authentication. Before I begin, should I support social login (Google, GitHub) as well, or just email/password for now?",
+      timestamp: '2026-05-02T10:15:30Z',
+    },
+    {
+      id: 'msg-003',
+      goalId: 'goal-001',
+      role: 'user',
+      content: 'Just email/password for now. Make sure to use bcrypt for hashing.',
+      timestamp: '2026-05-02T10:16:00Z',
+    },
+    {
+      id: 'msg-004',
+      goalId: 'goal-001',
+      role: 'coordinator',
+      content: "Good call on bcrypt. Let me have an architect analyze the codebase and create an implementation plan.",
+      timestamp: '2026-05-02T10:16:30Z',
+    },
+    {
+      id: 'msg-005',
+      goalId: 'goal-001',
+      role: 'tool_notification',
+      content: 'Spawning architect agent...',
+      timestamp: '2026-05-02T10:17:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'arch-001', persona: 'architect' },
+    },
+    {
+      id: 'msg-006',
+      goalId: 'goal-001',
+      role: 'tool_notification',
+      content: 'Architect completed: 4-phase plan created',
+      timestamp: '2026-05-02T10:22:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'arch-001', persona: 'architect' },
+    },
+    {
+      id: 'msg-007',
+      goalId: 'goal-001',
+      role: 'coordinator',
+      content: "The architect has analyzed the codebase and created a plan with 4 phases:\n\n1. **Database schema** — users and sessions tables (dba)\n2. **REST API** — auth endpoints (typescript-api-dev)\n3. **React components** — login, register, password reset (typescript-react-dev)\n4. **Integration testing and merge** (web-tester, integrator)\n\nI've also created feature branch `feat/user-auth`. Starting with the DBA now.",
+      timestamp: '2026-05-02T10:23:00Z',
+    },
+    {
+      id: 'msg-008',
+      goalId: 'goal-001',
+      role: 'tool_notification',
+      content: 'Branch created: feat/user-auth (from dev)',
+      timestamp: '2026-05-02T10:23:30Z',
+      meta: { toolName: 'create_branch', branch: 'feat/user-auth' },
+    },
+    {
+      id: 'msg-009',
+      goalId: 'goal-001',
+      role: 'tool_notification',
+      content: 'Spawning dba agent on feat/user-auth...',
+      timestamp: '2026-05-02T10:24:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'dba-001', persona: 'dba', branch: 'feat/user-auth' },
+    },
+    {
+      id: 'msg-010',
+      goalId: 'goal-001',
+      role: 'tool_notification',
+      content: 'dba-001 completed: Created users and sessions tables',
+      timestamp: '2026-05-02T10:28:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'dba-001', persona: 'dba' },
+    },
+    {
+      id: 'msg-011',
+      goalId: 'goal-001',
+      role: 'tool_notification',
+      content: 'Spawning code-reviewer for dba-001...',
+      timestamp: '2026-05-02T10:29:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'dba-001-rev', persona: 'code-reviewer', branch: 'feat/user-auth' },
+    },
+    {
+      id: 'msg-012',
+      goalId: 'goal-001',
+      role: 'tool_notification',
+      content: 'dba-001-rev: ⚠️ Changes requested — missing email index, missing updated_at',
+      timestamp: '2026-05-02T10:32:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'dba-001-rev', persona: 'code-reviewer' },
+    },
+    {
+      id: 'msg-013',
+      goalId: 'goal-001',
+      role: 'coordinator',
+      content: "The reviewer found some issues with the migrations. Re-spawning the DBA to add the email index and updated_at columns.",
+      timestamp: '2026-05-02T10:32:30Z',
+    },
+    {
+      id: 'msg-014',
+      goalId: 'goal-001',
+      role: 'tool_notification',
+      content: 'Spawning dba agent (re-work) on feat/user-auth...',
+      timestamp: '2026-05-02T10:33:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'dba-002', persona: 'dba', branch: 'feat/user-auth' },
+    },
+    {
+      id: 'msg-015',
+      goalId: 'goal-001',
+      role: 'tool_notification',
+      content: 'dba-002 completed: Added email index and updated_at columns',
+      timestamp: '2026-05-02T10:37:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'dba-002', persona: 'dba' },
+    },
+    {
+      id: 'msg-016',
+      goalId: 'goal-001',
+      role: 'tool_notification',
+      content: 'Spawning code-reviewer for dba-002...',
+      timestamp: '2026-05-02T10:38:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'dba-002-rev', persona: 'code-reviewer', branch: 'feat/user-auth' },
+    },
+    {
+      id: 'msg-017',
+      goalId: 'goal-001',
+      role: 'tool_notification',
+      content: 'dba-002-rev: ✅ Approved — all issues resolved',
+      timestamp: '2026-05-02T10:40:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'dba-002-rev', persona: 'code-reviewer' },
+    },
+    {
+      id: 'msg-018',
+      goalId: 'goal-001',
+      role: 'coordinator',
+      content: "Schema step is approved! Moving on to the REST API. Spawning the API developer now.",
+      timestamp: '2026-05-02T10:41:00Z',
+    },
+    {
+      id: 'msg-019',
+      goalId: 'goal-001',
+      role: 'tool_notification',
+      content: 'Spawning typescript-api-dev agent on feat/user-auth...',
+      timestamp: '2026-05-02T10:42:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'api-001', persona: 'typescript-api-dev', branch: 'feat/user-auth' },
+    },
+  ],
+  'goal-002': [
+    {
+      id: 'msg-201',
+      goalId: 'goal-002',
+      role: 'user',
+      content: 'Fix the broken pagination on the products listing page',
+      timestamp: '2026-05-02T11:00:00Z',
+    },
+    {
+      id: 'msg-202',
+      goalId: 'goal-002',
+      role: 'coordinator',
+      content: "I'll fix the pagination bug. Let me create a branch and spawn a developer to investigate.",
+      timestamp: '2026-05-02T11:00:30Z',
+    },
+    {
+      id: 'msg-203',
+      goalId: 'goal-002',
+      role: 'tool_notification',
+      content: 'Branch created: fix/product-pagination (from dev)',
+      timestamp: '2026-05-02T11:01:00Z',
+      meta: { toolName: 'create_branch', branch: 'fix/product-pagination' },
+    },
+    {
+      id: 'msg-204',
+      goalId: 'goal-002',
+      role: 'tool_notification',
+      content: 'Spawning typescript-react-dev on fix/product-pagination...',
+      timestamp: '2026-05-02T11:02:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'react-fix-001', persona: 'typescript-react-dev', branch: 'fix/product-pagination' },
+    },
+    {
+      id: 'msg-205',
+      goalId: 'goal-002',
+      role: 'tool_notification',
+      content: 'react-fix-001 completed: Fixed pagination offset bug',
+      timestamp: '2026-05-02T11:12:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'react-fix-001', persona: 'typescript-react-dev' },
+    },
+    {
+      id: 'msg-206',
+      goalId: 'goal-002',
+      role: 'tool_notification',
+      content: 'Spawning code-reviewer for react-fix-001...',
+      timestamp: '2026-05-02T11:13:00Z',
+      meta: { toolName: 'spawn_agent', agentId: 'react-fix-001-rev', persona: 'code-reviewer', branch: 'fix/product-pagination' },
+    },
+  ],
+  'goal-003': [
+    {
+      id: 'msg-301',
+      goalId: 'goal-003',
+      role: 'user',
+      content: 'Add dark mode support across the entire application',
+      timestamp: '2026-05-02T11:22:00Z',
+    },
+  ],
+};
+
+// ─── Run Log ─────────────────────────────────────────────────────
+
+export const mockRunLog: Record<string, RunLogEntry[]> = {
+  'goal-001': [
+    { id: 1, goalId: 'goal-001', timestamp: '2026-05-02T10:15:00Z', eventType: 'goal_set', payload: { goal: 'Add user authentication' }, summary: 'Goal set: Add user authentication with email/password' },
+    { id: 2, goalId: 'goal-001', timestamp: '2026-05-02T10:22:00Z', eventType: 'plan_created', payload: { version: 1, steps: 4 }, summary: 'Plan created (v1): 4 steps' },
+    { id: 3, goalId: 'goal-001', timestamp: '2026-05-02T10:23:30Z', eventType: 'branch_created', payload: { branch: 'feat/user-auth', base: 'dev' }, summary: 'Branch created: feat/user-auth (from dev)' },
+    { id: 4, goalId: 'goal-001', timestamp: '2026-05-02T10:24:00Z', eventType: 'agent_spawned', payload: { agentId: 'dba-001', persona: 'dba', branch: 'feat/user-auth' }, summary: 'Agent spawned: dba-001 (dba) on feat/user-auth' },
+    { id: 5, goalId: 'goal-001', timestamp: '2026-05-02T10:28:00Z', eventType: 'agent_completed', payload: { agentId: 'dba-001', status: 'success' }, summary: 'Agent completed: dba-001 — Created users and sessions tables' },
+    { id: 6, goalId: 'goal-001', timestamp: '2026-05-02T10:32:00Z', eventType: 'agent_completed', payload: { agentId: 'dba-001-rev', status: 'changes_requested' }, summary: 'Agent completed: dba-001-rev — Changes requested' },
+    { id: 7, goalId: 'goal-001', timestamp: '2026-05-02T10:37:00Z', eventType: 'agent_completed', payload: { agentId: 'dba-002', status: 'success' }, summary: 'Agent completed: dba-002 — Added email index and updated_at' },
+    { id: 8, goalId: 'goal-001', timestamp: '2026-05-02T10:40:00Z', eventType: 'agent_completed', payload: { agentId: 'dba-002-rev', status: 'approved' }, summary: 'Agent completed: dba-002-rev — Approved' },
+  ],
+  'goal-002': [
+    { id: 10, goalId: 'goal-002', timestamp: '2026-05-02T11:00:00Z', eventType: 'goal_set', payload: { goal: 'Fix pagination' }, summary: 'Goal set: Fix broken pagination on products listing' },
+    { id: 11, goalId: 'goal-002', timestamp: '2026-05-02T11:01:00Z', eventType: 'branch_created', payload: { branch: 'fix/product-pagination', base: 'dev' }, summary: 'Branch created: fix/product-pagination (from dev)' },
+    { id: 12, goalId: 'goal-002', timestamp: '2026-05-02T11:12:00Z', eventType: 'agent_completed', payload: { agentId: 'react-fix-001', status: 'success' }, summary: 'Agent completed: react-fix-001 — Fixed pagination offset bug' },
+  ],
+  'goal-003': [],
+};
+
+// ─── Helper to get elapsed time string ───────────────────────────
+
+export { getElapsed } from '../utils.js';

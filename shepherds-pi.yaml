@@ -1,0 +1,25 @@
+version: 1
+
+project:
+  name: shepherds-pi
+  repo_path: .
+  dev_branch: main
+  main_branch: main
+
+docker:
+  image: shepherds-pi-agent:latest
+  working_dir: /workspace/repo
+
+openrouter:
+  api_key: ${OPENROUTER_API_KEY}
+
+coordinator:
+  model: openrouter/anthropic/claude-sonnet-4
+  thinking_level: high
+
+personas_dir: ./personas
+
+agent:
+  timeout_minutes: 30
+  max_retries: 1
+  git_token_env: GIT_TOKEN

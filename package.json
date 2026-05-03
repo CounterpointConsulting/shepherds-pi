@@ -1,0 +1,31 @@
+{
+  "name": "shepherds-pi",
+  "version": "0.1.0",
+  "description": "Multi-agent software development automation",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.tsx",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "docker:build": "tsx src/scripts/docker-build.ts",
+    "test:agent": "tsx src/test/spawn-agent.ts"
+  },
+  "dependencies": {
+    "@mariozechner/pi-coding-agent": "^0.72.1",
+    "better-sqlite3": "^12.9.0",
+    "dockerode": "^5.0.0",
+    "ink": "^5.1.0",
+    "js-yaml": "^4.1.1",
+    "react": "^18.3.1",
+    "simple-git": "^3.36.0",
+    "typebox": "^1.1.37"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/dockerode": "^4.0.1",
+    "@types/js-yaml": "^4.0.9",
+    "@types/react": "^18.3.18",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

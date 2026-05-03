@@ -1,0 +1,278 @@
+Happy Path:
+    - User sets goal
+    - Coordinator writes spec and passes to architect
+    - Architect 
+        - analyzes the spec and determines changes / actions needed to achieve goal
+        - create plan with individual steps that can be assigned to implementor agents
+    - Coordinator
+        - per step / group of related steps, create git branch for work
+        - agents can be run in parallel if there are no dependencies between them
+    - Implementor Agent
+        - make changes in specified git branch
+        - when changes complete, push to git branch and signal completion to Coordinator
+    - Coordinator
+        - spawn reviewer agent to validate implementation 
+    - Reviewer Agent
+        - review spec and commits on the current branch
+        - suggest improvements if needed
+    - Coordinator
+        - if reviewer agent suggests changes, re-spawn implementor agent to resolve on that branch
+        - if review passes, spawn functional test agent
+    - Tester Agent
+        - pull branch, build, run application
+        - test with browser 
+        - identify issues and report back
+    - Coordinator
+        - if tester agent suggests changes, return to implementation: 
+            - re-spawn implementor agent to resolve on that branch
+        - if review passes, spawn merge agent to promote changes to dev branch
+    - Merge Agent
+        - merge changes on branch to dev branch and resolve any commit merge issues
+    - Coordinator
+        - spawn tester agent to valiate merge
+    - Tester Agent
+        - repeat testing, but on dev branch
+    - ...
+
+
+Exception Path:
+    - Tester Agent reports bug
+    - Coordinator spawns Debugger Agent
+    - Debugger Agent analyzes issue, returns findings to Coordinator
+    - Coordinator creates fix branch if required and passes to appropriate implementor agent
+    - Test
+    - Merge
+
+---
+
+Agent: a docker instance with git and pi, specialized for specific tasks.  Kicks off a pi agent
+    to respond to handle instructions for each step.
+
+Example agents:
+    - architect
+    - dba
+    - spring-boot-dev
+    - typescript-api-dev
+    - typescript-react-dev
+    - python-dev
+    - code-reviewer
+    - web-tester
+    - api-tester
+    - debugger
+
+Agents have persona:
+    - prompt
+    - available skills and tools
+
+---
+
+# Example Coordinator-Agent flow
+
+## User: "Add feature X..."
+
+## Orchestrator / Planner: 
+
+    - clarify with User as needed
+    - write high-level spec
+
+    - spawn agent container - architect
+        - name: arch-001-agent
+        - env:
+            - persona: architect
+            - instructions: create an implementation plan based on the feature 
+                or bugfix spec and the existing code base... (include spec)
+    
+    
+## arch-001-agent:
+    - run pi with prompt / instructions
+    - write plan to stdout (or stderr)
+    - signal Orchestrator arch-001-agent complete
+    
+    
+## Orchestrator / Planner:
+
+    - read arch-001-agent output from its stdout
+    - generate plan DAG based on architect agent output; things like:
+        - contract (data types + operations)
+        - db migrations
+        - api services
+        - react components
+        - (other changes)
+
+    - create git branch for implementation agents to work in - feature/X or bug/X
+    
+    - spawn appropriate workers for task (in parallel if possible; sequentially if not)
+    - in this example, sequentially: 
+        - dba 
+        - typescript-api-dev
+        - typescript-react-dev 
+
+    - create agent container - dba updates database migrations
+        - name: dba-001-agent
+        - env:
+            - git_url: ... 
+            - branch_name: ...
+            - token: ...
+            - persona: dba
+            - instructions: make database migration updates... (based on contract)
+
+
+## dba-001-agent:
+
+    - pull git branch
+    - run pi with prompt / instructions
+    - make changes on branch
+    - git add, commit, push
+    - signal Orchestrator dba-001-agent complete
+
+
+## Orchestrator / Planner:
+
+    - create code review agent: compare current schema to changes, ensure 
+        contract matches and best practices followed
+        - name: dba-001-reviewer
+        - env:
+            - git_url: ... 
+            - branch_name: ...
+            - token: ...
+            - persona: code-reviewer
+            - instructions: review the implementation of the database migrations... 
+                (based on branch commits and contract/spec)
+
+
+## dba-001-reviewer:
+
+    - pull git branch
+    - run pi with prompt / instructions
+    - write review and suggested changes to stdout
+    - signal Orchestrator dba-001-reviewer complete
+
+
+## Orchestrator / Planner:
+
+    - read dba-001-reviewer output from its stdio
+    - IF CODE REVIEW REQUIRES CHANGES, re-spawn the implementor agent and pass comments 
+        with instructions; repeat as needed.  When review passes, proceed with the next step.
+
+    - create agent container - api dev creates rest api on top of database updates
+        - name: api-001-agent
+        - env:
+            - git_url: ... 
+            - branch_name: ...
+            - token: ...
+            - persona: typescript-api-dev
+            - instructions: create / update REST api... (based on contract)
+
+
+## api-001-agent:
+    - pull git branch
+    - run pi with prompt / instructions
+    - make changes on branch
+    - git add, commit, push
+    - signal Orchestrator api-001-agent complete
+
+
+## Orchestrator / Planner:
+
+    - create code review agent: compare current API to changes, ensure 
+        contract matches and best practices followed
+        - name: api-001-reviewer
+        - env:
+            - git_url: ... 
+            - branch_name: ...
+            - token: ...
+            - persona: code-reviewer
+            - instructions: review the implementation of the REST API... 
+                (based on branch commits and contract/spec)
+
+
+## api-001-reviewer:
+
+    - pull git branch
+    - run pi with prompt / instructions
+    - write review and suggested changes to stdout
+    - signal Orchestrator api-001-reviewer complete
+
+
+## Orchestrator / Planner:
+
+    - read api-001-reviewer output from its stdio
+    - IF CODE REVIEW REQUIRES CHANGES, re-spawn the implementor agent and pass comments 
+        with instructions; repeat as needed.  When review passes, proceed with the next step.
+
+    - create agent container - frontend dev creates react display components
+        - name: react-001-agent
+        - env:
+            - git_url: ... 
+            - branch_name: ...
+            - token: ...
+            - persona: typescript-react-dev
+            - instructions: make the required updates to the react application... (include contract, etc)
+
+
+## react-001-agent:
+
+    - pull git branch
+    - run pi with prompt / instructions
+    - make changes on branch
+    - git add, commit, push
+    - signal Orchestrator react-001-agent complete
+
+
+## Orchestrator / Planner:
+
+    - create code review agent: compare current API to changes, ensure 
+        contract matches and best practices followed
+        - name: react-001-reviewer
+        - env:
+            - git_url: ... 
+            - branch_name: ...
+            - token: ...
+            - persona: code-reviewer
+            - instructions: review the implementation of the react application changes... 
+                (based on branch commits and contract/spec)
+
+
+## react-001-reviewer:
+
+    - pull git branch
+    - run pi with prompt / instructions
+    - write review and suggested changes to stdout
+    - signal Orchestrator react-001-reviewer complete
+
+
+## Orchestrator / Planner:
+
+    - read react-001-reviewer output from its stdio
+    - IF CODE REVIEW REQUIRES CHANGES, re-spawn the implementor agent and pass comments 
+        with instructions; repeat as needed.  When review passes, proceed with the next step.
+
+    - create agent container - tester uses browser-use skill to validate functionality
+        - name: feature-001-tester
+        - env:
+            - git_url: ... 
+            - branch_name: ...
+            - token: ...
+            - persona: tester
+            - instructions: use browser tool to load application and validate 
+                behavior update (include spec)
+
+
+## feature-001-tester:
+    - pull git branch
+    - build / run application in containers
+    - test spec with browser
+    - write review and suggested changes to stdout
+    - signal Orchestrator feature-001-tester complete
+
+
+## Orchestrator / Planner:
+
+    - read react-001-reviewer output from its stdio
+    - IF CODE REVIEW REQUIRES CHANGES, re-spawn the implementor agent and pass comments 
+        with instructions; repeat as needed.  When review passes, proceed with the next step.
+
+
+## ........
+
+
