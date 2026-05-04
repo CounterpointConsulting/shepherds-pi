@@ -36,6 +36,10 @@ export interface AgentResultJson {
 /**
  * Spawn a Docker container running pi with the given persona and instructions.
  * Returns when the container exits.
+ *
+ * This function is silent by design — all status flows through the
+ * onEvent/onStdout callbacks so the caller (orchestrator) controls
+ * how output reaches the user (e.g., via Ink TUI, not console.log).
  */
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const docker = new Docker();
@@ -73,11 +77,6 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // Container name
   const containerName = `shepherds-pi-${opts.agentId}`;
 
-  console.log(`Creating container: ${containerName}`);
-  console.log(`  Image:   ${opts.config.docker.image}`);
-  console.log(`  Model:   ${opts.persona.model}`);
-  console.log(`  Branch:  ${opts.branch ?? opts.config.project.devBranch}`);
-
   // Create and start container
   const container = await docker.createContainer({
     Image: opts.config.docker.image,
@@ -85,16 +84,12 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     Env: env,
     HostConfig: {
       Binds: binds,
-      // Give the container a reasonable amount of memory
       Memory: 2 * 1024 * 1024 * 1024, // 2GB
     },
     Tty: false,
     OpenStdin: false,
     StdinOnce: false,
   });
-
-  const containerId = container.id;
-  console.log(`  Container: ${containerId.substring(0, 12)}`);
 
   await container.start();
 
@@ -141,7 +136,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       }
     });
 
-    // Also capture stderr for debugging
+    // Capture stderr but don't print it — the caller handles output
     let stderrBuffer = '';
     stderrStream.on('data', (chunk: Buffer) => {
       stderrBuffer += chunk.toString('utf-8');
@@ -151,7 +146,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       for (const line of lines) {
         const trimmed = line.trim();
         if (trimmed) {
-          console.log(`  [stderr] ${trimmed}`);
+          // Emit stderr as an agent event so the TUI can display it
+          opts.onEvent?.({ type: 'container_stderr', line: trimmed });
         }
       }
     });
@@ -163,7 +159,6 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   // Wait for container to finish and get exit code
   const waitResult = await container.wait();
   const exitCode = (waitResult as unknown as { StatusCode: number }).StatusCode;
-  console.log(`Container exited with code: ${exitCode}`);
 
   // Read result.json from the mounted output dir
   let agentResult: AgentResultJson | null = null;
@@ -172,33 +167,20 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     try {
       const raw = fs.readFileSync(resultPath, 'utf-8');
       agentResult = JSON.parse(sanitizeJson(raw)) as AgentResultJson;
-      console.log(`Agent result: ${agentResult.status} — ${agentResult.summary}`);
-    } catch (err) {
-      console.log(`Warning: result.json exists but is not valid JSON: ${err}`);
+    } catch {
+      // Invalid JSON — will be reported via result being null
     }
-  } else {
-    console.log('Warning: No result.json produced by agent');
-  }
-
-  // Also check events.jsonl for debugging
-  const eventsPath = path.join(outputDir, 'events.jsonl');
-  if (fs.existsSync(eventsPath)) {
-    console.log(`Events log: ${eventsPath} (${Math.round(fs.statSync(eventsPath).size / 1024)}KB)`);
   }
 
   // Cleanup: remove container
   try {
     await container.remove({ force: true });
-  } catch {
-    // Container already removed or error
-  }
+  } catch { /* ignore */ }
 
   // Cleanup: remove temp dir
   try {
     fs.rmSync(tmpDir, { recursive: true, force: true });
-  } catch {
-    // Temp dir cleanup failed, non-critical
-  }
+  } catch { /* ignore */ }
 
   return {
     exitCode,
@@ -213,11 +195,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 export async function buildDockerImage(imageName?: string): Promise<void> {
   const docker = new Docker();
   const name = imageName ?? 'shepherds-pi-agent:latest';
-  // Resolve docker directory relative to this source file
   const thisDir = getModuleDir(import.meta.url);
   const dockerfilePath = path.resolve(thisDir, '../../docker');
-
-  console.log(`Building Docker image: ${name} from ${dockerfilePath}...`);
 
   const stream = await docker.buildImage(
     { context: dockerfilePath, src: ['Dockerfile', 'entrypoint.sh'] },
@@ -236,8 +215,6 @@ export async function buildDockerImage(imageName?: string): Promise<void> {
       },
     );
   });
-
-  console.log(`\n✅ Image built: ${name}`);
 }
 
 /**
@@ -249,9 +226,7 @@ export async function ensureImage(imageName?: string): Promise<void> {
 
   try {
     await docker.getImage(name).inspect();
-    console.log(`Image already exists: ${name}`);
   } catch {
-    console.log(`Image not found: ${name}`);
     await buildDockerImage(name);
   }
 }
@@ -262,9 +237,6 @@ export async function ensureImage(imageName?: string): Promise<void> {
  * instead of \n/\t, which makes JSON.parse fail.
  */
 function sanitizeJson(raw: string): string {
-  // Replace control characters (0x00-0x1F) with their escaped equivalents,
-  // but only inside JSON string values (between quotes).
-  // Outside of strings, these characters are already invalid JSON.
   let result = '';
   let inString = false;
   let escaped = false;
@@ -293,7 +265,6 @@ function sanitizeJson(raw: string): string {
     if (inString) {
       const code = ch.charCodeAt(0);
       if (code < 0x20) {
-        // Escape control characters
         switch (ch) {
           case '\n': result += '\\n'; break;
           case '\r': result += '\\r'; break;

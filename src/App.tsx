@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { Box, Text, useInput, useApp } from 'ink';
-import type { Goal, AgentRun, ViewMode, FocusZone, ChatMessage } from './types.js';
+import { Box, Text, useInput, useApp, useStdout } from 'ink';
+import type { Goal, ViewMode, FocusZone } from './types.js';
 import { OrchestratorManager } from './orchestrator/manager.js';
 import type { ShepherdsPiConfig } from './config/index.js';
 import { GoalTabs } from './components/GoalTabs.js';
@@ -12,6 +12,9 @@ import { InputBar } from './components/InputBar.js';
 
 export function App({ config }: { config: ShepherdsPiConfig }) {
   const { exit } = useApp();
+  const { stdout } = useStdout();
+  const termHeight = stdout?.rows ?? 24;
+  const termWidth = stdout?.columns ?? 80;
 
   // ─── Manager ─────────────────────────────────────────────────
   const managerRef = useRef<OrchestratorManager | null>(null);
@@ -20,7 +23,7 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
   }
   const manager = managerRef.current;
 
-  // ─── State (triggers re-renders) ──────────────────────────────
+  // ─── State ───────────────────────────────────────────────────
   const [, setTick] = useState(0);
   const forceUpdate = useCallback(() => setTick(t => t + 1), []);
 
@@ -29,7 +32,6 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [agentCursor, setAgentCursor] = useState(0);
 
-  // Subscribe to manager changes
   useEffect(() => {
     const unsub = manager.onChange(forceUpdate);
     return () => {
@@ -38,7 +40,7 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
     };
   }, [manager, forceUpdate]);
 
-  // ─── Derived state from manager ──────────────────────────────
+  // ─── Derived state ───────────────────────────────────────────
   const goals = manager.allGoals;
   const activeGoalId = manager.activeGoalId;
   const activeGoal = manager.getActiveGoal();
@@ -51,100 +53,84 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
     ? agentsForGoal.find(a => a.id === selectedAgentId) ?? null
     : null;
 
-  // Keep cursor in bounds when agents change
   useEffect(() => {
-    if (agentCursor >= agentsForGoal.length) {
-      setAgentCursor(Math.max(0, agentsForGoal.length - 1));
+    if (agentsForGoal.length === 0) {
+      setAgentCursor(0);
+      setSelectedAgentId(null);
+    } else if (agentCursor >= agentsForGoal.length) {
+      setAgentCursor(agentsForGoal.length - 1);
     }
   }, [agentsForGoal.length, agentCursor]);
 
-  // ─── Agent list navigation ───────────────────────────────────
+  // ─── Navigation ──────────────────────────────────────────────
   const navigateAgent = useCallback((direction: 'up' | 'down') => {
+    if (agentsForGoal.length === 0) return;
     setAgentCursor(prev => {
       if (direction === 'up') return Math.max(0, prev - 1);
       return Math.min(agentsForGoal.length - 1, prev + 1);
     });
   }, [agentsForGoal.length]);
 
-  // Keep selected agent in sync with cursor
   useEffect(() => {
-    if (agentsForGoal.length > 0 && focusZone === 'agents') {
+    if (agentsForGoal.length > 0) {
       setSelectedAgentId(agentsForGoal[agentCursor]?.id ?? null);
     }
-  }, [agentCursor, focusZone, agentsForGoal]);
+  }, [agentCursor, agentsForGoal]);
 
-  // ─── Keybindings ──────────────────────────────────────────────
+  // ─── Keybindings ─────────────────────────────────────────────
   useInput((input, key) => {
-    // Global: Ctrl+C / Ctrl+D = exit
     if (input === 'c' && key.ctrl) { exit(); return; }
     if (input === 'd' && key.ctrl) { exit(); return; }
 
-    // Number keys 1-9 switch goals (global, any view)
     if (/^[1-9]$/.test(input)) {
       const idx = parseInt(input) - 1;
-      if (idx < goals.length) {
-        handleGoalSelect(goals[idx].id);
-      }
+      if (idx < goals.length) handleGoalSelect(goals[idx].id);
       return;
     }
 
-    // Plan view: Escape or 'p' to go back
+    if (viewMode === 'agentExpanded') {
+      if (key.escape) { setViewMode('default'); return; }
+      return;
+    }
+
     if (viewMode === 'plan') {
       if (key.escape || input === 'p') { setViewMode('default'); }
       return;
     }
 
-    // Agent expanded view: Escape to go back
-    if (viewMode === 'agentExpanded') {
-      if (key.escape) { setViewMode('default'); }
+    if (input === '\t') {
+      setFocusZone(prev => prev === 'chat' ? 'agents' : 'chat');
       return;
     }
 
-    // Default view
-    if (viewMode === 'default') {
-      // Tab: toggle focus
-      if (input === '\t') {
-        setFocusZone(prev => prev === 'chat' ? 'agents' : 'chat');
-        return;
-      }
+    if (input === 'a' && agentsForGoal.length > 0) {
+      setFocusZone('agents');
+      if (selectedAgent) setViewMode('agentExpanded');
+      return;
+    }
 
-      // 'p': plan view (only when chat focused and no active input)
-      if (input === 'p' && focusZone === 'chat') {
-        setViewMode('plan');
-        return;
-      }
+    if (input === 'p') {
+      setViewMode('plan');
+      return;
+    }
 
-      // Agent zone navigation
-      if (focusZone === 'agents') {
-        if (key.upArrow) { navigateAgent('up'); return; }
-        if (key.downArrow) { navigateAgent('down'); return; }
-        if (key.return) {
-          const agent = agentsForGoal[agentCursor];
-          if (agent) {
-            setSelectedAgentId(agent.id);
-            setViewMode('agentExpanded');
-          }
-          return;
-        }
-      }
+    if (focusZone === 'agents') {
+      if (key.upArrow) { navigateAgent('up'); return; }
+      if (key.downArrow) { navigateAgent('down'); return; }
+      if (key.return && selectedAgent) { setViewMode('agentExpanded'); return; }
     }
   });
 
-  // ─── Handle input submit ──────────────────────────────────────
+  // ─── Handlers ────────────────────────────────────────────────
   const handleSubmit = useCallback((value: string) => {
     if (!value.trim()) return;
-
-    // If no active goal, treat input as a new goal
     if (!activeGoalId) {
       manager.startGoal(value.trim());
-      return;
+    } else {
+      manager.sendUserMessage(value.trim());
     }
-
-    // Otherwise, send to the active goal
-    manager.sendUserMessage(value.trim());
   }, [manager, activeGoalId]);
 
-  // ─── Goal switching ───────────────────────────────────────────
   const handleGoalSelect = useCallback((goalId: string) => {
     manager.switchGoal(goalId);
     setAgentCursor(0);
@@ -153,10 +139,27 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
     setFocusZone('chat');
   }, [manager]);
 
-  // ─── Welcome screen when no goals ─────────────────────────────
+  // ─── Layout calculation ──────────────────────────────────────
+  // The outermost Box MUST have height={termHeight} so yoga
+  // constrains the total layout to the terminal viewport.
+  // Children are allocated rows from this budget:
+  //   GoalTabs    = 1 row (fixed)
+  //   InputBar    = 3 rows (fixed: border-top + content + border-bottom)
+  //   StatusBar   = 1 row (fixed)
+  //   Main area   = termHeight - 5 rows (flexGrow absorbs remainder)
+  const mainHeight = Math.max(termHeight - 5, 6);
+  const agentPaneWidth = Math.max(Math.floor(termWidth * 0.35), 30);
+  const chatBorderWidth = 2; // border chars left + right
+  const chatInnerWidth = termWidth - agentPaneWidth - chatBorderWidth;
+  // Content width inside chat pane (subtract border + padding)
+  const chatContentWidth = Math.max(chatInnerWidth - 4, 20);
+  // Chat pane rows: mainHeight minus 2 border rows
+  const chatMaxRows = Math.max(mainHeight - 2, 4);
+
+  // ─── Welcome screen ──────────────────────────────────────────
   if (goals.length === 0) {
     return (
-      <Box flexDirection="column" height="100%" justifyContent="center" alignItems="center">
+      <Box flexDirection="column" height={termHeight} justifyContent="center" alignItems="center">
         <Text bold color="cyan">🐑 Shepherds Pi</Text>
         <Box marginTop={1}>
           <Text dimColor>Type a goal to get started</Text>
@@ -177,19 +180,18 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
     );
   }
 
-  // ─── Main render ──────────────────────────────────────────────
-
+  // ─── Main render ─────────────────────────────────────────────
   return (
-    <Box flexDirection="column" height="100%">
-      {/* Header with goal tabs */}
+    <Box flexDirection="column" height={termHeight}>
+      {/* 1 row — goal tabs */}
       <GoalTabs
         goals={goals}
         activeGoalId={activeGoalId ?? ''}
         onSelect={handleGoalSelect}
       />
 
-      {/* Main content area */}
-      <Box flexGrow={1} flexDirection="row">
+      {/* Flexible middle — chat + agents */}
+      <Box height={mainHeight} flexDirection="row">
         {viewMode === 'plan' ? (
           <PlanView plan={planForGoal} agents={agentsForGoal} />
         ) : viewMode === 'agentExpanded' && selectedAgent ? (
@@ -202,17 +204,22 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
           <>
             {/* Chat pane */}
             <Box
-              flexGrow={1}
+              width={chatInnerWidth + chatBorderWidth}
               flexDirection="column"
               borderStyle={focusZone === 'chat' ? 'bold' : 'single'}
               borderColor={focusZone === 'chat' ? 'cyan' : 'gray'}
             >
-              <ChatPane messages={messagesForGoal} goalStatus={activeGoal?.status} />
+              <ChatPane
+                messages={messagesForGoal}
+                goalStatus={activeGoal?.status}
+                maxRows={chatMaxRows}
+                contentWidth={chatContentWidth}
+              />
             </Box>
 
             {/* Agent pane */}
             <Box
-              width="35%"
+              width={agentPaneWidth}
               flexDirection="column"
               borderStyle={focusZone === 'agents' ? 'bold' : 'single'}
               borderColor={focusZone === 'agents' ? 'cyan' : 'gray'}
@@ -223,6 +230,8 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
                 selectedId={selectedAgentId}
                 onSelect={(id) => {
                   setSelectedAgentId(id);
+                  const idx = agentsForGoal.findIndex(a => a.id === id);
+                  if (idx >= 0) setAgentCursor(idx);
                 }}
               />
 
@@ -238,7 +247,7 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
         )}
       </Box>
 
-      {/* Input bar */}
+      {/* 3 rows — input bar */}
       <InputBar
         value=""
         onChange={() => {}}
@@ -247,12 +256,8 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
         focusZone={focusZone}
       />
 
-      {/* Status bar */}
-      <StatusBar
-        focusZone={focusZone}
-        viewMode={viewMode}
-        activeGoal={activeGoal}
-      />
+      {/* 1 row — status bar */}
+      <StatusBar focusZone={focusZone} viewMode={viewMode} activeGoal={activeGoal} />
     </Box>
   );
 }
@@ -272,11 +277,12 @@ function StatusBar({ focusZone, viewMode, activeGoal }: {
       </Text>
       <Text dimColor>
         {'  '}Tab:switch
-        {'  '}↑↓:navigate
-        {'  '}Enter:expand
-        {'  '}Esc:back
+        {'  '}↑↓:nav
+        {'  '}Enter:open
+        {'  '}a:agent detail
         {'  '}p:plan
-        {'  '}1-9:switch goal
+        {'  '}Esc:back
+        {'  '}1-9:goal
         {'  '}Ctrl+C:quit
       </Text>
     </Box>

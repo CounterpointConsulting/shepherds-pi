@@ -60,14 +60,18 @@ export interface AgentResult {
   commits?: string[];
   issues?: string[];
   suggestions?: string[];
-  findings?: Finding[];
+  findings?: Record<string, unknown>[];
 }
 
+// Finding is kept for reference but agent results use Record<string, unknown>[]
+// because different personas produce different finding structures.
 export interface Finding {
-  severity: 'critical' | 'warning' | 'info' | 'suggestion' | 'bug' | 'regression' | 'ux_issue';
+  severity: string;
   file?: string;
+  line?: number;
   description: string;
   suggestion?: string;
+  remediation?: string;
   stepsToReproduce?: string[];
 }
 

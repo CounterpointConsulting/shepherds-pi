@@ -7,6 +7,7 @@
  */
 
 import type { AgentSession, AgentSessionEvent } from '@mariozechner/pi-coding-agent';
+import type { ThinkingContent } from '@mariozechner/pi-ai';
 import type { ShepherdsPiConfig } from '../config/index.js';
 import type { ShepherdsDB, DbAgentRun, DbMessage } from '../db/index.js';
 import { createOrchestratorSession, startOrchestrator, type OrchestratorSession } from './session.js';
@@ -27,6 +28,9 @@ export class OrchestratorManager {
   private goals: Map<string, GoalState> = new Map();
   private listeners: Set<StateChangeCallback> = new Set();
   private _activeGoalId: string | null = null;
+  private notifyPending = false;
+  private notifyTimer: ReturnType<typeof setTimeout> | null = null;
+  private static NOTIFY_THROTTLE_MS = 300; // max ~3 re-renders/sec
 
   constructor(config: ShepherdsPiConfig) {
     this.config = config;
@@ -75,15 +79,37 @@ export class OrchestratorManager {
     return () => this.listeners.delete(callback);
   }
 
+  /**
+   * Throttled notification — coalesces rapid events into ~3 UI updates/sec.
+   * Use this for all streaming/background events.
+   */
   private notify() {
+    if (this.notifyPending) return;
+    this.notifyPending = true;
+
+    this.notifyTimer = setTimeout(() => {
+      this.notifyPending = false;
+      this.notifyTimer = null;
+      for (const cb of this.listeners) cb();
+    }, OrchestratorManager.NOTIFY_THROTTLE_MS);
+  }
+
+  /**
+   * Immediate notification — only for user-facing events where the user
+   * is actively waiting for a response (ask_user, user message, goal switch).
+   */
+  private notifyNow() {
+    // Cancel any pending throttled notification to avoid double-fire
+    if (this.notifyTimer) {
+      clearTimeout(this.notifyTimer);
+      this.notifyTimer = null;
+      this.notifyPending = false;
+    }
     for (const cb of this.listeners) cb();
   }
 
   // ─── Goal management ─────────────────────────────────────────
 
-  /**
-   * Start a new goal — creates a pi session, sends the goal as the first prompt.
-   */
   async startGoal(goalText: string): Promise<string> {
     const goalId = `goal-${Date.now().toString(36)}`;
 
@@ -115,9 +141,8 @@ export class OrchestratorManager {
 
     this.goals.set(goalId, state);
     this._activeGoalId = goalId;
-    this.notify();
+    this.notifyNow();
 
-    // Create the orchestrator session asynchronously
     try {
       const session = await createOrchestratorSession({
         config: this.config,
@@ -126,47 +151,36 @@ export class OrchestratorManager {
 
       state.session = session;
 
-      // Wire up event listeners
       this.wireSessionEvents(goalId, session);
       this.wireBusEvents(goalId, session.eventBus);
 
-      // Send the goal
       this.addMessage(goalId, 'coordinator', 'Starting orchestration...');
-      this.notify();
+      this.notifyNow();
 
-      // Start the orchestrator (non-blocking — it runs until it needs input or finishes)
       startOrchestrator(session, goalText).catch(err => {
         const msg = err instanceof Error ? err.message : String(err);
         this.addMessage(goalId, 'coordinator', `⚠️ Orchestration error: ${msg}`);
         state.goal.status = 'failed';
-        this.notify();
+        this.notifyNow();
       });
 
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       this.addMessage(goalId, 'coordinator', `⚠️ Failed to start: ${msg}`);
       state.goal.status = 'failed';
-      this.notify();
+      this.notifyNow();
     }
 
     return goalId;
   }
 
-  /**
-   * Switch the active goal (for multi-goal support).
-   */
   switchGoal(goalId: string): void {
     if (this.goals.has(goalId)) {
       this._activeGoalId = goalId;
-      this.notify();
+      this.notifyNow();
     }
   }
 
-  /**
-   * Send a user message to the active goal's orchestrator session.
-   * If there's a pending ask_user, the response resolves it.
-   * Otherwise, it's a regular prompt to the session.
-   */
   async sendUserMessage(text: string): Promise<void> {
     if (!this._activeGoalId) return;
     const state = this.goals.get(this._activeGoalId);
@@ -174,25 +188,23 @@ export class OrchestratorManager {
 
     this.addMessage(this._activeGoalId, 'user', text);
 
-    // If there's a pending ask_user, resolve it
     if (state.askUserResolver) {
       state.askUserResolver(text);
       state.pendingAskUser = null;
       state.askUserResolver = null;
-      this.notify();
+      this.notifyNow();
       return;
     }
 
-    // Otherwise, send as a prompt to the session
     if (state.session) {
       state.session.session.prompt(text).catch(err => {
         const msg = err instanceof Error ? err.message : String(err);
         this.addMessage(this._activeGoalId!, 'coordinator', `⚠️ Error: ${msg}`);
-        this.notify();
+        this.notifyNow();
       });
     }
 
-    this.notify();
+    this.notifyNow();
   }
 
   // ─── Event wiring ────────────────────────────────────────────
@@ -214,91 +226,131 @@ export class OrchestratorManager {
   }
 
   // ─── pi SDK session events ───────────────────────────────────
+  // All events here use throttled notify() — the UI updates at most
+  // 3x/sec. No streaming text updates; we show "Thinking..." until
+  // message_end delivers the final content.
 
   private handlePiEvent(goalId: string, event: AgentSessionEvent): void {
     const state = this.goals.get(goalId);
     if (!state) return;
 
-    if ('type' in event) {
-      switch (event.type) {
-        case 'agent_start':
-          this.addMessage(goalId, 'coordinator', '🤖 Coordinator is thinking...');
-          break;
+    if (!('type' in event)) return;
 
-        case 'message_end': {
-          // Assistant message completed — extract text content
-          const msg = event.message;
-          if (msg.role === 'assistant') {
-            const textContent = msg.content
-              .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-              .map(c => c.text)
-              .join('\n');
-            if (textContent.trim()) {
-              // Replace the "thinking..." message with the actual content
-              this.replaceLastCoordinatorMessage(goalId, textContent);
-            }
-          }
-          break;
+    switch (event.type) {
+      case 'agent_start':
+        // Agent loop starting — don't add message, each turn handles it
+        break;
+
+      case 'turn_start':
+        this.addMessage(goalId, 'coordinator', '🤖 Thinking...');
+        break;
+
+      case 'message_start': {
+        const m = event.message;
+        if (m && m.role === 'assistant') {
+          this.addMessage(goalId, 'coordinator', '🤖 Thinking...');
         }
-
-        case 'message_update': {
-          // Stream text deltas — update the last coordinator message in place
-          const msg = event.message;
-          if (msg.role === 'assistant') {
-            const textContent = msg.content
-              .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-              .map(c => c.text)
-              .join('');
-            if (textContent) {
-              this.updateLastCoordinatorMessage(goalId, textContent);
-            }
-          }
-          break;
-        }
-
-        case 'tool_execution_start': {
-          const toolName = event.toolName;
-          const toolLabel = this.getToolLabel(toolName);
-          const summary = this.getToolSummary(toolName, event.args);
-          this.addMessage(goalId, 'tool_notification', `${toolLabel} ${summary}`, {
-            toolName,
-          });
-          break;
-        }
-
-        case 'tool_execution_end': {
-          // Optionally update the tool notification with result
-          if (event.isError) {
-            this.addMessage(goalId, 'tool_notification', `⚠️ ${event.toolName} failed`, {
-              toolName: event.toolName,
-            });
-          }
-          break;
-        }
-
-        case 'agent_end':
-          if (state.goal.status !== 'failed') {
-            state.goal.status = 'completed';
-          }
-          this.addMessage(goalId, 'coordinator', '✅ Orchestration complete.');
-          break;
-
-        case 'compaction_start':
-          this.addMessage(goalId, 'tool_notification', '🔄 Context compacted — coordinator will read_run_log to recover', {
-            toolName: 'compaction',
-          });
-          break;
+        break;
       }
+
+      case 'message_update':
+        // Intentionally ignored — streaming text causes flicker.
+        // The final content arrives via message_end.
+        break;
+
+      case 'message_end': {
+        const msg = event.message;
+        if (msg.role === 'assistant') {
+          const textBlocks = msg.content
+            .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+            .map(c => c.text);
+          const textContent = textBlocks.join('\n');
+
+          const hasToolCall = msg.content.some(c => c.type === 'toolCall');
+
+          if (textContent.trim()) {
+            this.replaceLastCoordinatorMessage(goalId, textContent);
+          } else if (!hasToolCall) {
+            // Model used only thinking blocks (e.g., o3) — show thinking preview
+            const thinkingBlocks = msg.content
+              .filter((c): c is ThinkingContent => c.type === 'thinking');
+            if (thinkingBlocks.length > 0) {
+              const thinkingText = thinkingBlocks.map(t => t.thinking).join('\n');
+              const preview = thinkingText.length > 500
+                ? thinkingText.substring(0, 500) + '\n... (thinking continued)'
+                : thinkingText;
+              this.replaceLastCoordinatorMessage(goalId, `💭 Thinking:\n${preview}`);
+            }
+          } else {
+            // Model called a tool (possibly after thinking) — replace
+            // "Thinking..." with thinking preview, or remove it.
+            const thinkingBlocks = msg.content
+              .filter((c): c is ThinkingContent => c.type === 'thinking');
+            if (thinkingBlocks.length > 0) {
+              const thinkingText = thinkingBlocks.map(t => t.thinking).join('\n');
+              const preview = thinkingText.length > 300
+                ? thinkingText.substring(0, 300) + '\n...'
+                : thinkingText;
+              this.replaceLastCoordinatorMessage(goalId, `💭 ${preview}`);
+            } else {
+              this.removeLastCoordinatorMessage(goalId);
+            }
+          }
+        }
+        break;
+      }
+
+      case 'tool_execution_start': {
+        const toolName = event.toolName;
+        const toolLabel = this.getToolLabel(toolName);
+        const summary = this.getToolSummary(toolName, event.args);
+        this.addMessage(goalId, 'tool_notification', `${toolLabel} ${summary}`, {
+          toolName,
+        });
+        break;
+      }
+
+      case 'tool_execution_end': {
+        if (event.isError) {
+          this.addMessage(goalId, 'tool_notification', `⚠️ ${event.toolName} failed`, {
+            toolName: event.toolName,
+          });
+        }
+        break;
+      }
+
+      case 'turn_end':
+        break;
+
+      case 'agent_end':
+        // Clean up any leftover "Thinking..." placeholder
+        this.removeLastCoordinatorMessage(goalId);
+        if (state.goal.status !== 'failed') {
+          state.goal.status = 'completed';
+        }
+        this.addMessage(goalId, 'coordinator', '✅ Orchestration complete.');
+        this.notifyNow();
+        return; // skip throttled notify() at end
+
+      case 'compaction_start':
+        this.addMessage(goalId, 'tool_notification', '🔄 Context compacted — coordinator will read_run_log to recover', {
+          toolName: 'compaction',
+        });
+        break;
     }
 
     this.notify();
   }
 
   // ─── Orchestrator event bus events ───────────────────────────
+  // All bus events use throttled notify() — even agent_completed.
+  // Only ask_user needs notifyNow() because the user is waiting.
 
   private handleBusEvent(goalId: string, event: OrchestratorEvent): void {
     const state = this.goals.get(goalId);
     if (!state) return;
+
+    let needsImmediateUpdate = false;
 
     switch (event.type) {
       case 'goal_status_changed':
@@ -314,7 +366,6 @@ export class OrchestratorManager {
         break;
 
       case 'agent_spawned':
-        // Agent will be added to DB by the tool — refresh from DB
         this.refreshAgents(goalId);
         this.addMessage(goalId, 'tool_notification',
           `🔧 Agent spawned: ${event.agentId} (${event.persona})${event.branch ? ` on ${event.branch}` : ''}`,
@@ -324,25 +375,32 @@ export class OrchestratorManager {
 
       case 'agent_completed':
         this.refreshAgents(goalId);
-        const summary = (event.result as { summary?: string })?.summary ?? 'done';
+        needsImmediateUpdate = true;
         this.addMessage(goalId, 'tool_notification',
-          `✅ Agent completed: ${event.agentId} — ${summary}`,
+          `✅ Agent completed: ${event.agentId} — ${(event.result as { summary?: string })?.summary ?? 'done'}`,
           { toolName: 'spawn_agent', agentId: event.agentId }
         );
         break;
 
       case 'agent_failed':
         this.refreshAgents(goalId);
+        needsImmediateUpdate = true;
         this.addMessage(goalId, 'tool_notification',
           `❌ Agent failed: ${event.agentId} — ${event.error}`,
           { toolName: 'spawn_agent', agentId: event.agentId }
         );
         break;
 
-      case 'agent_event':
-        // Individual tool events from agents — could be used for live stream
-        // For now, just log at debug level
+      case 'agent_event': {
+        const eventType = (event.event as Record<string, unknown>)?.type as string | undefined;
+        if (eventType === 'container_stderr') {
+          const line = (event.event as Record<string, unknown>)?.line as string | undefined;
+          if (line) {
+            this.addMessage(goalId, 'tool_notification', `📦 ${line}`, { toolName: 'container' });
+          }
+        }
         break;
+      }
 
       case 'branch_created':
         this.addMessage(goalId, 'tool_notification',
@@ -352,15 +410,19 @@ export class OrchestratorManager {
         break;
 
       case 'user_question': {
-        // The coordinator is asking the user a question
         state.pendingAskUser = event.question;
         state.askUserResolver = event.resolve;
         this.addMessage(goalId, 'ask_user', event.question);
+        needsImmediateUpdate = true; // user is waiting for the prompt
         break;
       }
     }
 
-    this.notify();
+    if (needsImmediateUpdate) {
+      this.notifyNow();
+    } else {
+      this.notify();
+    }
   }
 
   // ─── DB refresh helpers ──────────────────────────────────────
@@ -408,7 +470,6 @@ export class OrchestratorManager {
       meta,
     });
 
-    // Also persist to DB
     if (state.session) {
       state.session.db.appendMessage(state.session.runId, role, content);
     }
@@ -418,16 +479,37 @@ export class OrchestratorManager {
     const state = this.goals.get(goalId);
     if (!state) return;
 
-    // Find the last coordinator message and replace it
+    // Only replace "Thinking..." placeholders — never clobber real messages.
+    // If the last coordinator message is actual content, add a new message instead.
     for (let i = state.messages.length - 1; i >= 0; i--) {
       if (state.messages[i].role === 'coordinator') {
-        state.messages[i] = { ...state.messages[i], content };
-        return;
+        const prev = state.messages[i].content;
+        if (prev === '🤖 Thinking...' || prev.startsWith('💭')) {
+          state.messages[i] = { ...state.messages[i], content };
+          return;
+        }
+        // Last coordinator message is real content — don't replace it
+        break;
       }
     }
 
-    // No existing message to replace — add new one
+    // No thinking placeholder found — add as a new message
     this.addMessage(goalId, 'coordinator', content);
+  }
+
+  private removeLastCoordinatorMessage(goalId: string): void {
+    const state = this.goals.get(goalId);
+    if (!state) return;
+
+    // Only remove "Thinking..." placeholders — never remove real messages
+    for (let i = state.messages.length - 1; i >= 0; i--) {
+      if (state.messages[i].role === 'coordinator') {
+        if (state.messages[i].content === '🤖 Thinking...') {
+          state.messages.splice(i, 1);
+        }
+        return;
+      }
+    }
   }
 
   private updateLastCoordinatorMessage(goalId: string, streamingText: string): void {
@@ -441,7 +523,6 @@ export class OrchestratorManager {
       }
     }
 
-    // No existing message — add new one
     this.addMessage(goalId, 'coordinator', streamingText);
   }
 
@@ -508,6 +589,11 @@ export class OrchestratorManager {
   // ─── Cleanup ─────────────────────────────────────────────────
 
   dispose(): void {
+    if (this.notifyTimer) {
+      clearTimeout(this.notifyTimer);
+      this.notifyTimer = null;
+      this.notifyPending = false;
+    }
     for (const state of this.goals.values()) {
       state.unsubPi?.();
       state.unsubBus?.();
