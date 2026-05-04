@@ -15,6 +15,8 @@ export interface SpawnOptions {
   gitUrl: string;
   gitToken: string;
   config: ShepherdsPiConfig;
+  /** Abort signal to cancel the agent mid-run (also triggers container.kill) */
+  signal?: AbortSignal;
   /** Called with parsed JSON events from the agent's pi stdout */
   onEvent?: (event: Record<string, unknown>) => void;
   /** Called with raw stdout lines */
@@ -25,6 +27,7 @@ export interface SpawnResult {
   exitCode: number;
   result: AgentResultJson | null;
   events: Record<string, unknown>[];
+  timedOut: boolean;
 }
 
 export interface AgentResultJson {
@@ -37,54 +40,109 @@ export interface AgentResultJson {
  * Spawn a Docker container running pi with the given persona and instructions.
  * Returns when the container exits.
  *
- * This function is silent by design — all status flows through the
- * onEvent/onStdout callbacks so the caller (orchestrator) controls
- * how output reaches the user (e.g., via Ink TUI, not console.log).
+ * Security posture:
+ *   - Runs as non-root uid 1000
+ *   - ReadonlyRootfs with explicit writable binds only
+ *   - CapDrop: ALL, no-new-privileges
+ *   - PidsLimit + NanoCpus + Memory caps
+ *   - Secrets (git token, OpenRouter key) delivered via tmpfs-mounted files,
+ *     never as container env vars or CLI args (keeps them out of `docker
+ *     inspect`, `ps`, and the image layer)
+ *   - Timeout enforced: container is killed after config.agent.timeoutMinutes
+ *
+ * This function is silent — all status flows through onEvent/onStdout
+ * callbacks so the caller (orchestrator) controls how output reaches the
+ * user (e.g. via Ink TUI, not console.log).
  */
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const docker = new Docker();
 
-  // Create temp dirs for instructions, context, and output
+  // ─── 1. Temp workspace on host ───────────────────────────────
+  // All three dirs are mounted into the container:
+  //   instructionsFile → /tmp/instructions.txt (read-only)
+  //   contextFile      → /tmp/context.txt     (read-only)
+  //   outputDir        → /output              (writable by agent uid 1000)
+  //   secretsDir       → /run/secrets         (read-only, tmpfs-backed in container)
+  //                                           — holds git_token + openrouter_key
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shepherds-pi-agent-'));
   const instructionsFile = path.join(tmpDir, 'instructions.txt');
   const contextFile = path.join(tmpDir, 'context.txt');
   const outputDir = path.join(tmpDir, 'output');
+  const secretsDir = path.join(tmpDir, 'secrets');
 
   fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(secretsDir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(instructionsFile, opts.instructions, 'utf-8');
   fs.writeFileSync(contextFile, opts.context ?? '', 'utf-8');
 
-  // Build environment variables
+  // Write secrets to files with 0600 perms. These are bind-mounted into the
+  // container at /run/secrets/* and never appear in argv or container env.
+  const gitTokenFile = path.join(secretsDir, 'git_token');
+  const openrouterKeyFile = path.join(secretsDir, 'openrouter_key');
+  fs.writeFileSync(gitTokenFile, opts.gitToken, { encoding: 'utf-8', mode: 0o600 });
+  fs.writeFileSync(openrouterKeyFile, opts.config.openrouter.apiKey, { encoding: 'utf-8', mode: 0o600 });
+
+  // Make the output dir writable by the container's agent user (uid 1000).
+  try { fs.chmodSync(outputDir, 0o777); } catch { /* best effort */ }
+
+  // ─── 2. Container env (NO secrets here) ──────────────────────
+  // Secrets are delivered via /run/secrets/* file mounts, not Env, so
+  // `docker inspect` on the container shows no credentials.
   const env: string[] = [
     `GIT_URL=${opts.gitUrl}`,
-    `GIT_TOKEN=${opts.gitToken}`,
     `BRANCH_NAME=${opts.branch ?? opts.config.project.devBranch}`,
     `PERSONA_DIR=/persona`,
     `INSTRUCTIONS_FILE=/tmp/instructions.txt`,
     `CONTEXT_FILE=/tmp/context.txt`,
     `MODEL=${opts.persona.model}`,
-    `OPENROUTER_API_KEY=${opts.config.openrouter.apiKey}`,
   ];
 
-  // Build volume mounts
+  // ─── 3. Bind mounts ──────────────────────────────────────────
   const binds = [
     `${opts.persona.dir}:/persona:ro`,
     `${instructionsFile}:/tmp/instructions.txt:ro`,
     `${contextFile}:/tmp/context.txt:ro`,
     `${outputDir}:/output`,
+    `${secretsDir}:/run/secrets:ro`,
   ];
 
-  // Container name
+  // ─── 4. Container config ─────────────────────────────────────
   const containerName = `shepherds-pi-${opts.agentId}`;
+  const timeoutMs = opts.config.agent.timeoutMinutes * 60 * 1000;
 
-  // Create and start container
   const container = await docker.createContainer({
     Image: opts.config.docker.image,
     name: containerName,
     Env: env,
+    // Non-root user defined in the Dockerfile
+    User: '1000:1000',
     HostConfig: {
       Binds: binds,
-      Memory: 2 * 1024 * 1024 * 1024, // 2GB
+      // Resource caps — prevent runaway agents from hurting the host
+      Memory: 2 * 1024 * 1024 * 1024,           // 2 GB RAM
+      NanoCpus: 2_000_000_000,                  // 2.0 CPUs
+      PidsLimit: 512,                           // cap fork bombs
+      // Security posture
+      ReadonlyRootfs: true,                     // image layers are read-only
+      SecurityOpt: ['no-new-privileges:true'],  // setuid binaries can't escalate
+      CapDrop: ['ALL'],                         // drop all Linux capabilities
+      // Tmpfs mounts — everything the agent writes must land on one of
+      // these (or the /output bind mount), since the rootfs is read-only.
+      //   /workspace    — where the repo is cloned (large, needs exec for
+      //                   git hooks if any, tooling, npm install, etc.)
+      //   /tmp          — scratch (noexec is safe)
+      //   /home/node/.pi— pi's local cache
+      // /run/secrets is bind-mounted separately above (ro).
+      // mode=1777 = world-writable + sticky (like /tmp). The `node` user
+      // owns nothing on these mounts but can create its own subdirs.
+      Tmpfs: {
+        '/workspace': 'rw,nosuid,size=4g,mode=1777',
+        '/tmp': 'rw,noexec,nosuid,size=256m,mode=1777',
+        '/home/node/.pi': 'rw,noexec,nosuid,size=64m,mode=1777',
+      },
+      // Default network (bridge). Future S-level hardening can add an
+      // egress-restricted network here that only allows OpenRouter +
+      // GitHub hosts.
     },
     Tty: false,
     OpenStdin: false,
@@ -93,7 +151,21 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   await container.start();
 
-  // Stream stdout/stderr using dockerode's demuxStream
+  // ─── 5. Timeout enforcement ──────────────────────────────────
+  // Kill the container after timeoutMinutes. Also honor an external
+  // AbortSignal so the caller (TUI) can cancel manually.
+  let timedOut = false;
+  const timeoutHandle = setTimeout(() => {
+    timedOut = true;
+    container.kill({ signal: 'SIGKILL' }).catch(() => { /* best effort */ });
+  }, timeoutMs);
+
+  const abortHandler = () => {
+    container.kill({ signal: 'SIGKILL' }).catch(() => { /* best effort */ });
+  };
+  opts.signal?.addEventListener('abort', abortHandler, { once: true });
+
+  // ─── 6. Stream stdout/stderr ─────────────────────────────────
   const events: Record<string, unknown>[] = [];
 
   const logStream = await container.logs({
@@ -102,51 +174,41 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     follow: true,
   });
 
-  // Create PassThrough streams for demuxed stdout/stderr
   const { PassThrough } = await import('node:stream');
   const stdoutStream = new PassThrough();
   const stderrStream = new PassThrough();
-
-  // Demux the Docker multiplexed stream
   docker.modem.demuxStream(logStream, stdoutStream, stderrStream);
 
-  // Process stdout (JSON events from pi --mode json)
   const stdoutLines: string[] = [];
   await new Promise<void>((resolve, reject) => {
     let stdoutBuffer = '';
-
     stdoutStream.on('data', (chunk: Buffer) => {
       stdoutBuffer += chunk.toString('utf-8');
       const lines = stdoutBuffer.split('\n');
       stdoutBuffer = lines.pop() ?? '';
-
       for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
         stdoutLines.push(trimmed);
         opts.onStdout?.(trimmed);
-
         try {
           const event = JSON.parse(trimmed);
           events.push(event);
           opts.onEvent?.(event);
         } catch {
-          // Not JSON — plain log line from entrypoint, skip
+          // Not JSON — plain log line from entrypoint, ignore
         }
       }
     });
 
-    // Capture stderr but don't print it — the caller handles output
     let stderrBuffer = '';
     stderrStream.on('data', (chunk: Buffer) => {
       stderrBuffer += chunk.toString('utf-8');
       const lines = stderrBuffer.split('\n');
       stderrBuffer = lines.pop() ?? '';
-
       for (const line of lines) {
         const trimmed = line.trim();
         if (trimmed) {
-          // Emit stderr as an agent event so the TUI can display it
           opts.onEvent?.({ type: 'container_stderr', line: trimmed });
         }
       }
@@ -156,11 +218,14 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     logStream.on('error', reject);
   });
 
-  // Wait for container to finish and get exit code
+  // ─── 7. Wait for exit + cleanup ──────────────────────────────
   const waitResult = await container.wait();
   const exitCode = (waitResult as unknown as { StatusCode: number }).StatusCode;
 
-  // Read result.json from the mounted output dir
+  clearTimeout(timeoutHandle);
+  opts.signal?.removeEventListener('abort', abortHandler);
+
+  // ─── 8. Read result.json ─────────────────────────────────────
   let agentResult: AgentResultJson | null = null;
   const resultPath = path.join(outputDir, 'result.json');
   if (fs.existsSync(resultPath)) {
@@ -168,16 +233,22 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       const raw = fs.readFileSync(resultPath, 'utf-8');
       agentResult = JSON.parse(sanitizeJson(raw)) as AgentResultJson;
     } catch {
-      // Invalid JSON — will be reported via result being null
+      // Invalid JSON — reported via result being null
     }
   }
 
-  // Cleanup: remove container
+  // ─── 9. Cleanup: remove container + scrub tmp dir ────────────
   try {
     await container.remove({ force: true });
   } catch { /* ignore */ }
 
-  // Cleanup: remove temp dir
+  // Best-effort overwrite of secret files before removing the tmpdir
+  // (defence in depth against tmpfs-swap disclosure on old kernels).
+  try {
+    const zeros = Buffer.alloc(256, 0);
+    if (fs.existsSync(gitTokenFile)) fs.writeFileSync(gitTokenFile, zeros);
+    if (fs.existsSync(openrouterKeyFile)) fs.writeFileSync(openrouterKeyFile, zeros);
+  } catch { /* ignore */ }
   try {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   } catch { /* ignore */ }
@@ -186,6 +257,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     exitCode,
     result: agentResult,
     events,
+    timedOut,
   };
 }
 
@@ -199,7 +271,7 @@ export async function buildDockerImage(imageName?: string): Promise<void> {
   const dockerfilePath = path.resolve(thisDir, '../../docker');
 
   const stream = await docker.buildImage(
-    { context: dockerfilePath, src: ['Dockerfile', 'entrypoint.sh'] },
+    { context: dockerfilePath, src: ['Dockerfile', 'entrypoint.sh', 'git-askpass.sh'] },
     { t: name },
   );
 
