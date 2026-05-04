@@ -20,7 +20,7 @@ const stepColor: Record<StepStatus, string> = {
 
 export function PlanView({ plan, agents }: {
   plan: Plan | null;
-  agents: AgentRun[];
+  agents: ReadonlyArray<AgentRun>;
 }) {
   if (!plan || plan.steps.length === 0) {
     return (
