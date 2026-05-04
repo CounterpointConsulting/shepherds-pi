@@ -162,21 +162,25 @@ function createSpawnAgentTool(
         const status = result.exitCode === 0 ? 'done' : 'failed';
         db.updateAgentStatus(agentId, status, result.result ? JSON.stringify(result.result) : undefined);
 
+        const failReason = result.timedOut
+          ? `Timed out after ${config.agent.timeoutMinutes} minutes`
+          : `Exit code ${result.exitCode}`;
+
         if (status === 'done') {
           db.appendLog(runId, 'agent_completed', { agentId }, `Agent completed: ${agentId} — ${result.result?.summary ?? 'no summary'}`);
           eventBus.emit({ type: 'agent_completed', agentId, result: result.result });
         } else {
-          db.appendLog(runId, 'agent_failed', { agentId, exitCode: result.exitCode }, `Agent failed: ${agentId}`);
-          eventBus.emit({ type: 'agent_failed', agentId, error: `Exit code ${result.exitCode}` });
+          db.appendLog(runId, 'agent_failed', { agentId, exitCode: result.exitCode, timedOut: result.timedOut }, `Agent failed: ${agentId} — ${failReason}`);
+          eventBus.emit({ type: 'agent_failed', agentId, error: failReason });
         }
 
         const resultText = result.result
           ? JSON.stringify(result.result, null, 2)
-          : `Agent exited with code ${result.exitCode}. No structured result was produced.`;
+          : `Agent ${result.timedOut ? 'timed out' : `exited with code ${result.exitCode}`}. No structured result was produced.`;
 
         return {
           content: [{ type: 'text' as const, text: resultText }],
-          details: { agentId, exitCode: result.exitCode, status } as Record<string, unknown>,
+          details: { agentId, exitCode: result.exitCode, status, timedOut: result.timedOut } as Record<string, unknown>,
         };
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
@@ -255,13 +259,17 @@ function createSpawnAgentsTool(
             const status = result.exitCode === 0 ? 'done' : 'failed';
             db.updateAgentStatus(agentId, status, result.result ? JSON.stringify(result.result) : undefined);
 
+            const failReason = result.timedOut
+              ? `Timed out after ${config.agent.timeoutMinutes} minutes`
+              : `Exit code ${result.exitCode}`;
+
             if (status === 'done') {
               eventBus.emit({ type: 'agent_completed', agentId, result: result.result });
             } else {
-              eventBus.emit({ type: 'agent_failed', agentId, error: `Exit code ${result.exitCode}` });
+              eventBus.emit({ type: 'agent_failed', agentId, error: failReason });
             }
 
-            return { index, agentId, result: result.result, exitCode: result.exitCode };
+            return { index, agentId, result: result.result, exitCode: result.exitCode, timedOut: result.timedOut };
           } catch (err: unknown) {
             const message = err instanceof Error ? err.message : String(err);
             db.updateAgentStatus(agentId, 'failed');

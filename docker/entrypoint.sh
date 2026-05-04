@@ -1,18 +1,27 @@
 #!/bin/bash
 set -euo pipefail
 
-# Prevent git from prompting for credentials interactively
+# ─── Security: never expose secrets in argv, env to children, or on disk ─
+
+# Prevent git from prompting for credentials interactively.
 export GIT_TERMINAL_PROMPT=0
 
-# ─── Environment variables (passed by Orchestrator) ──────────────
-#   GIT_URL            - repository URL (https://github.com/org/repo)
-#   GIT_TOKEN          - personal access token for git
-#   BRANCH_NAME        - branch to checkout (defaults to "dev")
-#   PERSONA_DIR        - path to persona config mount (default: /persona)
-#   INSTRUCTIONS_FILE  - path to instructions file mount
-#   CONTEXT_FILE       - path to context file mount
-#   MODEL              - model ID (e.g., openrouter/anthropic/claude-sonnet-4)
-#   OPENROUTER_API_KEY - API key for OpenRouter
+# Route all git credential requests through our askpass helper, which reads
+# from the tmpfs-mounted /run/secrets/git_token. The token is NEVER placed
+# into the clone URL or .git/config.
+export GIT_ASKPASS=/usr/local/bin/git-askpass.sh
+
+# ─── Environment variables (passed by Orchestrator) ─────────────────────
+#   GIT_URL              - clean repository URL (no credentials)
+#   BRANCH_NAME          - branch to checkout (defaults to "dev")
+#   PERSONA_DIR          - path to persona config mount (default: /persona)
+#   INSTRUCTIONS_FILE    - path to instructions file mount
+#   CONTEXT_FILE         - path to context file mount
+#   MODEL                - model ID (e.g., openrouter/anthropic/claude-sonnet-4)
+#
+# Secrets are read from tmpfs, never from env:
+#   /run/secrets/git_token       - GitHub PAT
+#   /run/secrets/openrouter_key  - OpenRouter API key
 
 echo "=== Shepherds Pi Agent ===" >&2
 echo "Persona: ${PERSONA_DIR:-/persona}" >&2
@@ -28,22 +37,19 @@ fi
 
 BRANCH_NAME="${BRANCH_NAME:-dev}"
 
-# Build authenticated URL (GitHub PAT format: https://x-access-token:TOKEN@github.com/...)
-if [ -n "${GIT_TOKEN:-}" ]; then
-  # Use x-access-token as username per GitHub recommendation
-  AUTH_URL=$(echo "$GIT_URL" | sed "s|://|://x-access-token:${GIT_TOKEN}@|")
-else
-  AUTH_URL="$GIT_URL"
+if [ ! -r /run/secrets/git_token ]; then
+  echo '{"type":"error","message":"No git token mounted at /run/secrets/git_token"}' >&2
+  exit 1
 fi
 
 echo "Cloning ${BRANCH_NAME} from ${GIT_URL}..." >&2
 
-# Try cloning the specific branch first
-CLONE_ERR=$(git clone --branch "$BRANCH_NAME" --single-branch --depth 50 "$AUTH_URL" /workspace/repo 2>&1) || {
+# Git will call GIT_ASKPASS for credentials. The URL stays clean — no
+# token embedded — so .git/config after clone contains only $GIT_URL.
+CLONE_ERR=$(git clone --branch "$BRANCH_NAME" --single-branch --depth 50 "$GIT_URL" /workspace/repo 2>&1) || {
   echo "Single-branch clone failed: $CLONE_ERR" >&2
-  # If single-branch fails (branch may not exist), clone all branches
   echo "Trying full clone..." >&2
-  CLONE_ERR2=$(git clone --depth 50 "$AUTH_URL" /workspace/repo 2>&1) || {
+  CLONE_ERR2=$(git clone --depth 50 "$GIT_URL" /workspace/repo 2>&1) || {
     echo "Clone failed: $CLONE_ERR2" >&2
     echo '{"type":"error","message":"git clone failed — check GIT_TOKEN and repo access"}' >&2
     exit 1
@@ -55,6 +61,16 @@ CLONE_ERR=$(git clone --branch "$BRANCH_NAME" --single-branch --depth 50 "$AUTH_
 }
 
 cd /workspace/repo
+
+# Belt-and-suspenders: verify no credential ended up in the remote URL
+# (would only happen if someone reverted the clone command above).
+CURRENT_REMOTE=$(git remote get-url origin)
+case "$CURRENT_REMOTE" in
+  *@*)
+    echo "WARNING: remote URL contains credentials, rewriting to clean URL" >&2
+    git remote set-url origin "$GIT_URL"
+    ;;
+esac
 
 # ─── 2. Configure git identity ──────────────────────────────────
 
@@ -73,44 +89,44 @@ else
   MODEL_ARG="openrouter/anthropic/claude-sonnet-4"
 fi
 
-# Strip "openrouter/" prefix — pi uses the provider name directly
-# e.g. "openrouter/anthropic/claude-sonnet-4" → pi --model openrouter/anthropic/claude-sonnet-4
-# pi's --model supports the "provider/model" format natively
+# ─── 4. Load OpenRouter API key from tmpfs into env for pi ──────
 
-# ─── 4. Build pi command ────────────────────────────────────────
+if [ ! -r /run/secrets/openrouter_key ]; then
+  echo '{"type":"error","message":"No OpenRouter key mounted at /run/secrets/openrouter_key"}' >&2
+  exit 1
+fi
+
+# pi reads OPENROUTER_API_KEY from env — this is the one place the key
+# has to live as an env var (for pi's process). It is NOT passed on the
+# command line (which would appear in `ps`), and it is NOT set in the
+# container's Docker Env (which would appear in `docker inspect`).
+# The key originates from /run/secrets/openrouter_key on a tmpfs mount.
+OPENROUTER_API_KEY="$(cat /run/secrets/openrouter_key)"
+export OPENROUTER_API_KEY
+
+# ─── 5. Build pi command ────────────────────────────────────────
 
 PI_ARGS=()
-
-# Mode: JSON event stream
 PI_ARGS+=("--mode" "json")
-
-# Model
 PI_ARGS+=("--model" "$MODEL_ARG")
+# NOTE: --api-key deliberately omitted — pi reads OPENROUTER_API_KEY
+# from env instead, so the key does not appear in argv.
 
-# API key
-PI_ARGS+=("--api-key" "${OPENROUTER_API_KEY}")
-
-# System prompt: use --append-system-prompt for persona instructions
-# This adds to the default coding assistant system prompt
 PERSONA_DIR="${PERSONA_DIR:-/persona}"
 
 if [ -f "$PERSONA_DIR/SYSTEM.md" ]; then
   PI_ARGS+=("--append-system-prompt" "$PERSONA_DIR/SYSTEM.md")
 fi
 
-# Instructions as the prompt (the first positional argument to pi)
-# We'll pipe them in or use the prompt directly
 INSTRUCTIONS=""
 if [ -f "${INSTRUCTIONS_FILE:-/tmp/instructions.txt}" ]; then
   INSTRUCTIONS=$(cat "${INSTRUCTIONS_FILE:-/tmp/instructions.txt}")
 fi
 
-# Context: append to system prompt
 if [ -s "${CONTEXT_FILE:-/tmp/context.txt}" ]; then
   PI_ARGS+=("--append-system-prompt" "${CONTEXT_FILE:-/tmp/context.txt}")
 fi
 
-# Skills (if persona has them)
 if [ -d "$PERSONA_DIR/skills" ]; then
   for skill_dir in "$PERSONA_DIR/skills"/*/; do
     if [ -d "$skill_dir" ] && [ -f "$skill_dir/SKILL.md" ]; then
@@ -119,7 +135,6 @@ if [ -d "$PERSONA_DIR/skills" ]; then
   done
 fi
 
-# Summarize reminder — appended to system prompt
 SUMMARIZE_REMINDER="IMPORTANT: When you have completed your task (or cannot make further progress), you MUST write a JSON result file to /output/result.json using the write tool. Use this exact format:
 
 {
@@ -136,13 +151,11 @@ Then commit and push any changes to the current branch with an appropriate commi
 
 PI_ARGS+=("--append-system-prompt" "$SUMMARIZE_REMINDER")
 
-# ─── 5. Run pi ──────────────────────────────────────────────────
+# ─── 6. Run pi ──────────────────────────────────────────────────
 
 echo "Starting pi with model $MODEL_ARG..." >&2
 echo "Instructions: ${INSTRUCTIONS:0:100}..." >&2
 
-# Run pi with the instructions as the prompt in non-interactive mode
-# --print: process prompt and exit (allows multi-turn tool use within one invocation)
 if [ -n "$INSTRUCTIONS" ]; then
   pi "${PI_ARGS[@]}" --print "$INSTRUCTIONS" 2>/dev/null | tee /output/events.jsonl
   EXIT_CODE=${PIPESTATUS[0]}
@@ -153,44 +166,34 @@ fi
 
 echo "Pi exited with code $EXIT_CODE" >&2
 
-# ─── 6. Verify result.json exists ───────────────────────────────
+# ─── 7. Verify result.json exists (fallback using jq, not python3) ──
 
 if [ ! -f /output/result.json ]; then
   echo "Warning: /output/result.json not created by agent" >&2
 
-  # Try to create a basic result from the events
-  # Look for the last assistant message
   if [ -f /output/events.jsonl ]; then
     LAST_MSG=$(grep '"message_end"' /output/events.jsonl | tail -1 || true)
     if [ -n "$LAST_MSG" ]; then
-      # Extract text content from the last message
-      SUMMARY=$(echo "$LAST_MSG" | python3 -c "
-import sys, json
-try:
-    msg = json.loads(sys.stdin.read())
-    content = msg.get('message', {}).get('content', [])
-    texts = [c['text'] for c in content if c.get('type') == 'text']
-    print(' '.join(texts)[:500])
-except:
-    print('Agent completed but did not produce a result file')
-" 2>/dev/null || echo "Agent completed")
-
-      echo "{\"status\":\"partial\",\"summary\":\"$SUMMARY\"}" > /output/result.json
+      SUMMARY=$(echo "$LAST_MSG" \
+        | jq -r '[.message.content[]? | select(.type == "text") | .text] | join(" ") | .[0:500]' \
+        2>/dev/null || echo "Agent completed but did not produce a result file")
+      # Escape the summary for safe JSON embedding
+      ESCAPED_SUMMARY=$(printf '%s' "$SUMMARY" | jq -Rs .)
+      echo "{\"status\":\"partial\",\"summary\":$ESCAPED_SUMMARY}" > /output/result.json
     fi
   fi
 fi
 
-# Push any changes (only if token is available)
+# ─── 8. Commit and push any changes ─────────────────────────────
+
 cd /workspace/repo
 if [ -n "$(git status --porcelain)" ]; then
   git add -A
   git commit -m "feat: agent changes for task" 2>/dev/null || true
 fi
 
-if [ -n "${GIT_TOKEN:-}" ]; then
-  git push origin HEAD 2>/dev/null || echo "Warning: push failed" >&2
-else
-  echo "No GIT_TOKEN set, skipping push" >&2
-fi
+# Push uses GIT_ASKPASS, so the token is read from tmpfs and never
+# appears in the remote URL or argv.
+git push origin HEAD 2>/dev/null || echo "Warning: push failed" >&2
 
 exit $EXIT_CODE

@@ -160,6 +160,11 @@ async function main() {
       gitToken,
       config,
       onEvent: (event) => {
+        // Surface container stderr for diagnosis
+        if (event.type === 'container_stderr') {
+          console.log(`  📦 ${event.line}`);
+          return;
+        }
         // Print key events
         if (event.type === 'agent_start') {
           console.log('[agent_start]');
