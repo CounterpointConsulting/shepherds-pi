@@ -79,6 +79,9 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   try { fs.chmodSync(outputDir, 0o777); } catch { /* best effort */ }
 
+  const sharedUsingAgentSkillsDir = path.join(opts.config.personasDir, 'using-agent-skills');
+  const hasSharedUsingAgentSkills = fs.existsSync(path.join(sharedUsingAgentSkillsDir, 'SKILL.md'));
+
   // ─── 2. Container env (NO secrets here) ──────────────────────
   const env: string[] = [
     `GIT_URL=${opts.gitUrl}`,
@@ -97,6 +100,10 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     `${outputDir}:/output`,
     `${secretsDir}:/run/secrets:ro`,
   ];
+
+  if (hasSharedUsingAgentSkills) {
+    binds.push(`${sharedUsingAgentSkillsDir}:/shared-skills/using-agent-skills:ro`);
+  }
 
   // ─── 4. Container config ─────────────────────────────────────
   const containerName = `shepherds-pi-${opts.agentId}`;

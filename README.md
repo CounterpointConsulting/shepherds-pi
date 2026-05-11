@@ -55,12 +55,13 @@ shepherds-pi/
 │   ├── typescript-react-dev/   # claude-sonnet-4 — frontend React code
 │   ├── code-reviewer/          # gemini-2.5-pro — reviews code quality
 │   ├── web-tester/             # claude-sonnet-4 — tests web apps
-│   └── integrator/             # o3 — merges branches, resolves conflicts
+│   ├── integrator/             # o3 — merges branches, resolves conflicts
+│   ├── using-agent-skills/     # shared meta-skill for dynamic workflow skill selection
 │   └── <persona>/
 │       ├── SYSTEM.md           # Persona system prompt
 │       ├── model.txt           # Model ID (e.g., openrouter/openai/o3)
-│       └── skills/summarize/
-│           └── SKILL.md        # Instructs agent to write result.json
+│       └── skills/*/
+│           └── SKILL.md        # Workflow skills + summarize handoff contract
 ├── src/
 │   ├── index.tsx               # Entry point — loads config, renders TUI
 │   ├── App.tsx                 # Main TUI component (Ink/React)
@@ -226,6 +227,23 @@ agent:
 Agent `result.json` payloads use **camelCase** keys as the canonical schema (for example: `filesCreated`, `filesModified`, `dependsOn`, `testsPassed`, `stepsToReproduce`).
 
 For backward compatibility, the spawner normalizes older snake_case payloads on ingest, but new persona skills and docs should always emit camelCase.
+
+## Skill Authoring Pattern
+
+Workflow skills should follow a consistent template. Use:
+
+- `personas/SKILL_TEMPLATE.md` as the canonical structure for new skills
+- `personas/using-agent-skills/SKILL.md` as the shared meta-skill for dynamic skill selection
+
+`using-agent-skills` supports an optional requested skill list in instructions/context, for example:
+
+```json
+{
+  "requestedSkills": ["security-and-hardening", "test-driven-development"]
+}
+```
+
+Agents should load only the minimum relevant skills for the task, and always complete with `summarize`.
 
 ## Testing
 

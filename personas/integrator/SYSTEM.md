@@ -15,3 +15,8 @@ Guidelines:
 - Always run tests after merging
 - Never create new features — only integrate and validate
 - If tests fail after merge, fix the integration issues (not the feature)
+
+Skill usage policy:
+- At task start, use the shared `using-agent-skills` meta-skill to select and load only the workflow skills needed for this task.
+- If instructions/context provide `requestedSkills`, prioritize loading those skills when available.
+- Always complete with the `summarize` skill.
