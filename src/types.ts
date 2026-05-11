@@ -61,6 +61,11 @@ export interface AgentResult {
   issues?: string[];
   suggestions?: string[];
   findings?: Record<string, unknown>[];
+  conflictsResolved?: string[];
+  conflictsRemaining?: string[];
+  testsRun?: number;
+  testsPassed?: number;
+  testsFailed?: number;
 }
 
 // Finding is kept for reference but agent results use Record<string, unknown>[]

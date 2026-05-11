@@ -221,6 +221,12 @@ agent:
 8. Spawner reads `result.json` from the mounted output directory
 9. Container is removed, result returns to the Orchestrator
 
+## Result Schema Notes
+
+Agent `result.json` payloads use **camelCase** keys as the canonical schema (for example: `filesCreated`, `filesModified`, `dependsOn`, `testsPassed`, `stepsToReproduce`).
+
+For backward compatibility, the spawner normalizes older snake_case payloads on ingest, but new persona skills and docs should always emit camelCase.
+
 ## Testing
 
 ```bash

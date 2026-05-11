@@ -11,9 +11,9 @@ Write a JSON file at /output/result.json:
 {
   "status": "success | conflicts | failed",
   "summary": "Brief description of merge result",
-  "conflicts_resolved": ["path/to/conflicting/file"],
-  "conflicts_remaining": [],
-  "tests_passed": true
+  "conflictsResolved": ["path/to/conflicting/file"],
+  "conflictsRemaining": [],
+  "testsPassed": true
 }
 ```
 

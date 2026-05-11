@@ -17,7 +17,7 @@ with this structure:
       "id": "step-1",
       "description": "What this step should accomplish",
       "persona": "which persona to assign",
-      "depends_on": [],
+      "dependsOn": [],
       "branch": "feature-branch-name"
     }
   ],

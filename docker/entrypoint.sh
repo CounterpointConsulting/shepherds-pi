@@ -135,19 +135,15 @@ if [ -d "$PERSONA_DIR/skills" ]; then
   done
 fi
 
-SUMMARIZE_REMINDER="IMPORTANT: When you have completed your task (or cannot make further progress), you MUST write a JSON result file to /output/result.json using the write tool. Use this exact format:
+SUMMARIZE_REMINDER="IMPORTANT: When you have completed your task (or cannot make further progress), you MUST write /output/result.json using the write tool.
 
-{
-  \"status\": \"success\" | \"partial\" | \"failed\",
-  \"summary\": \"Brief description of what was accomplished\",
-  \"filesModified\": [\"path/to/file\"],
-  \"filesCreated\": [\"path/to/file\"],
-  \"commits\": [\"commit message\"],
-  \"issues\": [\"any issues encountered\"],
-  \"suggestions\": [\"suggestions for next steps\"]
-}
+Follow your persona's summarize skill schema exactly. Use camelCase field names (e.g., filesCreated, filesModified, dependsOn, testsPassed, stepsToReproduce) rather than snake_case.
 
-Then commit and push any changes to the current branch with an appropriate commit message."
+Always include at least:
+- status
+- summary
+
+Then commit and push any code changes to the current branch with an appropriate commit message."
 
 PI_ARGS+=("--append-system-prompt" "$SUMMARIZE_REMINDER")
 

@@ -368,7 +368,7 @@ interface PlanStep {
   id: string;                    // "step-1"
   description: string;           // What to do
   persona: string;               // Which persona to use
-  depends_on: string[];          // Step IDs this depends on
+  dependsOn: string[];           // Step IDs this depends on
   branch?: string;               // Feature branch (null for read-only personas)
   status: StepStatus;            // pending | in_progress | complete | failed | blocked
   agent_runs?: AgentRunSummary[]; // History of agent executions for this step
@@ -632,8 +632,8 @@ Every persona has a `summarize` skill that produces structured output at `/outpu
 {
   "status": "success | partial | failed",
   "summary": "Brief description of what was done",
-  "files_created": ["path/to/file1"],
-  "files_modified": ["path/to/file2"],
+  "filesCreated": ["path/to/file1"],
+  "filesModified": ["path/to/file2"],
   "commits": ["commit message 1"],
   "issues": ["Any issues or concerns"],
   "suggestions": ["Suggestions for the next agent"]
@@ -666,14 +666,14 @@ Every persona has a `summarize` skill that produces structured output at `/outpu
 {
   "status": "passed | failed | blocked",
   "summary": "Brief overall test result",
-  "tests_run": 5,
-  "tests_passed": 4,
-  "tests_failed": 1,
+  "testsRun": 5,
+  "testsPassed": 4,
+  "testsFailed": 1,
   "findings": [
     {
       "severity": "bug | regression | ux_issue | suggestion",
       "description": "What was found",
-      "steps_to_reproduce": ["step 1", "step 2"],
+      "stepsToReproduce": ["step 1", "step 2"],
       "suggestion": "How to fix it"
     }
   ],
@@ -687,9 +687,9 @@ Every persona has a `summarize` skill that produces structured output at `/outpu
 {
   "status": "success | conflicts | failed",
   "summary": "Brief description of merge result",
-  "conflicts_resolved": ["path/to/conflicting/file"],
-  "conflicts_remaining": [],
-  "tests_passed": true
+  "conflictsResolved": ["path/to/conflicting/file"],
+  "conflictsRemaining": [],
+  "testsPassed": true
 }
 ```
 
@@ -744,7 +744,7 @@ Orchestrator: creates feature branch
   ▼
 Orchestrator: starts with DBA
   → calls spawn_agent(persona="dba", branch="feat/user-auth", instructions="Create database migrations...", context=architect_output)
-    └─► [Docker: dba-001] → result: { status: "success", files_modified: [...] }
+    └─► [Docker: dba-001] → result: { status: "success", filesModified: [...] }
   │
   ▼
 Orchestrator: reviews the DBA's work
@@ -1249,7 +1249,7 @@ the agent detail to take the full screen width:
 │  {                                                           │
 │    "status": "success",                                      │
 │    "summary": "Added email index migration",                 │
-│    "files_modified": ["db/migrations/003_add_email_index.sql"],│
+│    "filesModified": ["db/migrations/003_add_email_index.sql"],│
 │    "commits": ["Add index on users.email column"],           │
 │    "issues": [],                                             │
 │    "suggestions": []                                         │
