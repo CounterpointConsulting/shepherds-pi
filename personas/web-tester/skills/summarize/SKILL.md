@@ -11,14 +11,14 @@ Write a JSON file at /output/result.json:
 {
   "status": "passed | failed | blocked",
   "summary": "Brief overall test result",
-  "tests_run": 5,
-  "tests_passed": 4,
-  "tests_failed": 1,
+  "testsRun": 5,
+  "testsPassed": 4,
+  "testsFailed": 1,
   "findings": [
     {
       "severity": "bug | regression | ux_issue | suggestion",
       "description": "What was found",
-      "steps_to_reproduce": ["step 1", "step 2"],
+      "stepsToReproduce": ["step 1", "step 2"],
       "suggestion": "How to fix it"
     }
   ],

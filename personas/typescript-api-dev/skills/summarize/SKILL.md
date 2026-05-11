@@ -12,8 +12,8 @@ JSON file at /output/result.json with this structure:
 {
   "status": "success | partial | failed",
   "summary": "Brief description of what you did",
-  "files_created": ["path/to/file1"],
-  "files_modified": ["path/to/file2"],
+  "filesCreated": ["path/to/file1"],
+  "filesModified": ["path/to/file2"],
   "commits": ["commit message 1"],
   "issues": ["Any issues encountered or concerns"],
   "suggestions": ["Suggestions for the next agent"]
