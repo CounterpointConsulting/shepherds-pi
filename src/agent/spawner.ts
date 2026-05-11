@@ -231,7 +231,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   if (fs.existsSync(resultPath)) {
     try {
       const raw = fs.readFileSync(resultPath, 'utf-8');
-      agentResult = JSON.parse(sanitizeJson(raw)) as AgentResultJson;
+      const parsed = JSON.parse(sanitizeJson(raw)) as unknown;
+      agentResult = normalizeResultShape(parsed);
     } catch {
       // Invalid JSON — reported via result being null
     }
@@ -353,4 +354,58 @@ function sanitizeJson(raw: string): string {
   }
 
   return result;
+}
+
+/**
+ * Normalize agent result payloads to the app's canonical camelCase schema.
+ *
+ * Older persona skills used snake_case keys (e.g. files_created), while the
+ * TUI and TS types expect camelCase (filesCreated). Normalize on ingest so we
+ * remain backward compatible and UI rendering stays consistent.
+ */
+function normalizeResultShape(value: unknown): AgentResultJson | null {
+  if (!isRecord(value)) return null;
+  const normalized = normalizeKeysDeep(value);
+  return isRecord(normalized) ? (normalized as AgentResultJson) : null;
+}
+
+function normalizeKeysDeep(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(normalizeKeysDeep);
+  }
+
+  if (!isRecord(value)) {
+    return value;
+  }
+
+  const keyMap: Record<string, string> = {
+    files_created: 'filesCreated',
+    files_modified: 'filesModified',
+    conflicts_resolved: 'conflictsResolved',
+    conflicts_remaining: 'conflictsRemaining',
+    tests_run: 'testsRun',
+    tests_passed: 'testsPassed',
+    tests_failed: 'testsFailed',
+    steps_to_reproduce: 'stepsToReproduce',
+    depends_on: 'dependsOn',
+  };
+
+  const out: Record<string, unknown> = {};
+
+  for (const [key, rawVal] of Object.entries(value)) {
+    const normalizedKey = keyMap[key] ?? key;
+    const normalizedVal = normalizeKeysDeep(rawVal);
+
+    // If both snake_case and camelCase versions exist, keep the first value
+    // encountered to avoid overwriting explicit newer fields.
+    if (!(normalizedKey in out)) {
+      out[normalizedKey] = normalizedVal;
+    }
+  }
+
+  return out;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

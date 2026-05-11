@@ -161,6 +161,35 @@ function AgentDetailExpanded({ agent, onBack, maxRows }: { agent: AgentRun; onBa
               ))}
             </Box>
           )}
+
+          {agent.result.conflictsResolved && agent.result.conflictsResolved.length > 0 && (
+            <Box flexDirection="column">
+              <Text bold>Conflicts resolved:</Text>
+              {agent.result.conflictsResolved.map((file, i) => (
+                <Text key={`${file}-${i}`} color="green">  ✓ {file}</Text>
+              ))}
+            </Box>
+          )}
+
+          {agent.result.conflictsRemaining && agent.result.conflictsRemaining.length > 0 && (
+            <Box flexDirection="column">
+              <Text bold>Conflicts remaining:</Text>
+              {agent.result.conflictsRemaining.map((file, i) => (
+                <Text key={`${file}-${i}`} color="red">  ✗ {file}</Text>
+              ))}
+            </Box>
+          )}
+
+          {(typeof agent.result.testsRun === 'number' || typeof agent.result.testsPassed === 'number' || typeof agent.result.testsFailed === 'number') && (
+            <Box>
+              <Text bold>Tests: </Text>
+              <Text>
+                {typeof agent.result.testsRun === 'number' ? `${agent.result.testsRun} run` : 'n/a run'}
+                {typeof agent.result.testsPassed === 'number' ? ` · ${agent.result.testsPassed} passed` : ''}
+                {typeof agent.result.testsFailed === 'number' ? ` · ${agent.result.testsFailed} failed` : ''}
+              </Text>
+            </Box>
+          )}
         </Box>
       )}
     </Box>
