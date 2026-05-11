@@ -48,7 +48,10 @@ export interface AgentResultJson {
  *   - Secrets (git token, OpenRouter key) delivered via tmpfs-mounted files,
  *     never as container env vars or CLI args (keeps them out of `docker
  *     inspect`, `ps`, and the image layer)
- *   - Timeout enforced: container is killed after config.agent.timeoutMinutes
+ *   - Timeout enforced: container is killed after config.agent.timeoutMinutes.
+ *     The cleanup (timer, abort listener, container.remove, tmpdir delete,
+ *     secret-file scrub) runs in a finally block so it still executes if
+ *     the log stream or container.wait throws.
  *
  * This function is silent — all status flows through onEvent/onStdout
  * callbacks so the caller (orchestrator) controls how output reaches the
@@ -58,12 +61,6 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const docker = new Docker();
 
   // ─── 1. Temp workspace on host ───────────────────────────────
-  // All three dirs are mounted into the container:
-  //   instructionsFile → /tmp/instructions.txt (read-only)
-  //   contextFile      → /tmp/context.txt     (read-only)
-  //   outputDir        → /output              (writable by agent uid 1000)
-  //   secretsDir       → /run/secrets         (read-only, tmpfs-backed in container)
-  //                                           — holds git_token + openrouter_key
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shepherds-pi-agent-'));
   const instructionsFile = path.join(tmpDir, 'instructions.txt');
   const contextFile = path.join(tmpDir, 'context.txt');
@@ -75,19 +72,14 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   fs.writeFileSync(instructionsFile, opts.instructions, 'utf-8');
   fs.writeFileSync(contextFile, opts.context ?? '', 'utf-8');
 
-  // Write secrets to files with 0600 perms. These are bind-mounted into the
-  // container at /run/secrets/* and never appear in argv or container env.
   const gitTokenFile = path.join(secretsDir, 'git_token');
   const openrouterKeyFile = path.join(secretsDir, 'openrouter_key');
   fs.writeFileSync(gitTokenFile, opts.gitToken, { encoding: 'utf-8', mode: 0o600 });
   fs.writeFileSync(openrouterKeyFile, opts.config.openrouter.apiKey, { encoding: 'utf-8', mode: 0o600 });
 
-  // Make the output dir writable by the container's agent user (uid 1000).
   try { fs.chmodSync(outputDir, 0o777); } catch { /* best effort */ }
 
   // ─── 2. Container env (NO secrets here) ──────────────────────
-  // Secrets are delivered via /run/secrets/* file mounts, not Env, so
-  // `docker inspect` on the container shows no credentials.
   const env: string[] = [
     `GIT_URL=${opts.gitUrl}`,
     `BRANCH_NAME=${opts.branch ?? opts.config.project.devBranch}`,
@@ -114,35 +106,20 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     Image: opts.config.docker.image,
     name: containerName,
     Env: env,
-    // Non-root user defined in the Dockerfile
     User: '1000:1000',
     HostConfig: {
       Binds: binds,
-      // Resource caps — prevent runaway agents from hurting the host
-      Memory: 2 * 1024 * 1024 * 1024,           // 2 GB RAM
-      NanoCpus: 2_000_000_000,                  // 2.0 CPUs
-      PidsLimit: 512,                           // cap fork bombs
-      // Security posture
-      ReadonlyRootfs: true,                     // image layers are read-only
-      SecurityOpt: ['no-new-privileges:true'],  // setuid binaries can't escalate
-      CapDrop: ['ALL'],                         // drop all Linux capabilities
-      // Tmpfs mounts — everything the agent writes must land on one of
-      // these (or the /output bind mount), since the rootfs is read-only.
-      //   /workspace    — where the repo is cloned (large, needs exec for
-      //                   git hooks if any, tooling, npm install, etc.)
-      //   /tmp          — scratch (noexec is safe)
-      //   /home/node/.pi— pi's local cache
-      // /run/secrets is bind-mounted separately above (ro).
-      // mode=1777 = world-writable + sticky (like /tmp). The `node` user
-      // owns nothing on these mounts but can create its own subdirs.
+      Memory: 2 * 1024 * 1024 * 1024,
+      NanoCpus: 2_000_000_000,
+      PidsLimit: 512,
+      ReadonlyRootfs: true,
+      SecurityOpt: ['no-new-privileges:true'],
+      CapDrop: ['ALL'],
       Tmpfs: {
         '/workspace': 'rw,nosuid,size=4g,mode=1777',
         '/tmp': 'rw,noexec,nosuid,size=256m,mode=1777',
         '/home/node/.pi': 'rw,noexec,nosuid,size=64m,mode=1777',
       },
-      // Default network (bridge). Future S-level hardening can add an
-      // egress-restricted network here that only allows OpenRouter +
-      // GitHub hosts.
     },
     Tty: false,
     OpenStdin: false,
@@ -151,9 +128,11 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   await container.start();
 
-  // ─── 5. Timeout enforcement ──────────────────────────────────
+  // ─── 5. Timeout + abort enforcement ──────────────────────────
   // Kill the container after timeoutMinutes. Also honor an external
   // AbortSignal so the caller (TUI) can cancel manually.
+  // The try/finally below guarantees these handlers are cleaned up
+  // even if the log stream or container.wait throws.
   let timedOut = false;
   const timeoutHandle = setTimeout(() => {
     timedOut = true;
@@ -165,94 +144,95 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   };
   opts.signal?.addEventListener('abort', abortHandler, { once: true });
 
-  // ─── 6. Stream stdout/stderr ─────────────────────────────────
   const events: Record<string, unknown>[] = [];
-
-  const logStream = await container.logs({
-    stdout: true,
-    stderr: true,
-    follow: true,
-  });
-
-  const { PassThrough } = await import('node:stream');
-  const stdoutStream = new PassThrough();
-  const stderrStream = new PassThrough();
-  docker.modem.demuxStream(logStream, stdoutStream, stderrStream);
-
-  const stdoutLines: string[] = [];
-  await new Promise<void>((resolve, reject) => {
-    let stdoutBuffer = '';
-    stdoutStream.on('data', (chunk: Buffer) => {
-      stdoutBuffer += chunk.toString('utf-8');
-      const lines = stdoutBuffer.split('\n');
-      stdoutBuffer = lines.pop() ?? '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        stdoutLines.push(trimmed);
-        opts.onStdout?.(trimmed);
-        try {
-          const event = JSON.parse(trimmed);
-          events.push(event);
-          opts.onEvent?.(event);
-        } catch {
-          // Not JSON — plain log line from entrypoint, ignore
-        }
-      }
-    });
-
-    let stderrBuffer = '';
-    stderrStream.on('data', (chunk: Buffer) => {
-      stderrBuffer += chunk.toString('utf-8');
-      const lines = stderrBuffer.split('\n');
-      stderrBuffer = lines.pop() ?? '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed) {
-          opts.onEvent?.({ type: 'container_stderr', line: trimmed });
-        }
-      }
-    });
-
-    logStream.on('end', resolve);
-    logStream.on('error', reject);
-  });
-
-  // ─── 7. Wait for exit + cleanup ──────────────────────────────
-  const waitResult = await container.wait();
-  const exitCode = (waitResult as unknown as { StatusCode: number }).StatusCode;
-
-  clearTimeout(timeoutHandle);
-  opts.signal?.removeEventListener('abort', abortHandler);
-
-  // ─── 8. Read result.json ─────────────────────────────────────
+  let exitCode = -1;
   let agentResult: AgentResultJson | null = null;
-  const resultPath = path.join(outputDir, 'result.json');
-  if (fs.existsSync(resultPath)) {
-    try {
-      const raw = fs.readFileSync(resultPath, 'utf-8');
-      const parsed = JSON.parse(sanitizeJson(raw)) as unknown;
-      agentResult = normalizeResultShape(parsed);
-    } catch {
-      // Invalid JSON — reported via result being null
+
+  try {
+    // ─── 6. Stream stdout/stderr ───────────────────────────────
+    const logStream = await container.logs({
+      stdout: true,
+      stderr: true,
+      follow: true,
+    });
+
+    const { PassThrough } = await import('node:stream');
+    const stdoutStream = new PassThrough();
+    const stderrStream = new PassThrough();
+    docker.modem.demuxStream(logStream, stdoutStream, stderrStream);
+
+    await new Promise<void>((resolve, reject) => {
+      let stdoutBuffer = '';
+      stdoutStream.on('data', (chunk: Buffer) => {
+        stdoutBuffer += chunk.toString('utf-8');
+        const lines = stdoutBuffer.split('\n');
+        stdoutBuffer = lines.pop() ?? '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          opts.onStdout?.(trimmed);
+          try {
+            const event = JSON.parse(trimmed);
+            events.push(event);
+            opts.onEvent?.(event);
+          } catch {
+            // Not JSON — plain log line from entrypoint, ignore
+          }
+        }
+      });
+
+      let stderrBuffer = '';
+      stderrStream.on('data', (chunk: Buffer) => {
+        stderrBuffer += chunk.toString('utf-8');
+        const lines = stderrBuffer.split('\n');
+        stderrBuffer = lines.pop() ?? '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed) {
+            opts.onEvent?.({ type: 'container_stderr', line: trimmed });
+          }
+        }
+      });
+
+      logStream.on('end', resolve);
+      logStream.on('error', reject);
+    });
+
+    // ─── 7. Wait for exit ──────────────────────────────────────
+    const waitResult = await container.wait();
+    exitCode = (waitResult as unknown as { StatusCode: number }).StatusCode;
+
+    // ─── 8. Read result.json ───────────────────────────────────
+    const resultPath = path.join(outputDir, 'result.json');
+    if (fs.existsSync(resultPath)) {
+      try {
+        const raw = fs.readFileSync(resultPath, 'utf-8');
+        const parsed = JSON.parse(sanitizeJson(raw)) as unknown;
+        agentResult = normalizeResultShape(parsed);
+      } catch {
+        // Invalid JSON — reported via result being null
+      }
     }
+  } finally {
+    // ─── 9. Cleanup — always runs, even on stream errors or abort ──
+    clearTimeout(timeoutHandle);
+    opts.signal?.removeEventListener('abort', abortHandler);
+
+    try {
+      await container.remove({ force: true });
+    } catch { /* ignore */ }
+
+    // Best-effort overwrite of secret files before removing the tmpdir
+    // (defence in depth against tmpfs-swap disclosure on old kernels).
+    try {
+      const zeros = Buffer.alloc(256, 0);
+      if (fs.existsSync(gitTokenFile)) fs.writeFileSync(gitTokenFile, zeros);
+      if (fs.existsSync(openrouterKeyFile)) fs.writeFileSync(openrouterKeyFile, zeros);
+    } catch { /* ignore */ }
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch { /* ignore */ }
   }
-
-  // ─── 9. Cleanup: remove container + scrub tmp dir ────────────
-  try {
-    await container.remove({ force: true });
-  } catch { /* ignore */ }
-
-  // Best-effort overwrite of secret files before removing the tmpdir
-  // (defence in depth against tmpfs-swap disclosure on old kernels).
-  try {
-    const zeros = Buffer.alloc(256, 0);
-    if (fs.existsSync(gitTokenFile)) fs.writeFileSync(gitTokenFile, zeros);
-    if (fs.existsSync(openrouterKeyFile)) fs.writeFileSync(openrouterKeyFile, zeros);
-  } catch { /* ignore */ }
-  try {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  } catch { /* ignore */ }
 
   return {
     exitCode,

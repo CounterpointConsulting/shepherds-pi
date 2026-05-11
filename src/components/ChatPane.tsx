@@ -57,7 +57,7 @@ function estimateMessageHeight(msg: ChatMessage, contentWidth: number): number {
 }
 
 interface ChatPaneProps {
-  messages: ChatMessage[];
+  messages: ReadonlyArray<ChatMessage>;
   goalStatus: GoalStatus | undefined;
   maxRows: number;
   contentWidth: number;

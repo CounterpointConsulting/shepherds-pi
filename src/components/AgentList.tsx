@@ -19,7 +19,7 @@ const statusColor: Record<AgentStatus, string> = {
 };
 
 export function AgentList({ agents, cursorIndex, selectedId }: {
-  agents: AgentRun[];
+  agents: ReadonlyArray<AgentRun>;
   cursorIndex: number;
   selectedId: string | null;
   onSelect: (id: string) => void;
