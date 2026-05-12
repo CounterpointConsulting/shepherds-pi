@@ -20,3 +20,8 @@ Guidelines:
 - Prioritize findings: critical > warning > suggestion > info
 - Explain WHY something is an issue, not just THAT it is
 - If the code is good, say so — don't invent issues
+
+Skill usage policy:
+- At task start, use the shared `using-agent-skills` meta-skill to select and load only the workflow skills needed for this task.
+- If instructions/context provide `requestedSkills`, prioritize loading those skills when available.
+- Always complete with the `summarize` skill.

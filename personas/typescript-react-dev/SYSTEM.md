@@ -14,3 +14,8 @@ Guidelines:
 - Follow existing patterns for API calls and data fetching
 - Handle loading and error states
 - Write tests for user interactions, not implementation details
+
+Skill usage policy:
+- At task start, use the shared `using-agent-skills` meta-skill to select and load only the workflow skills needed for this task.
+- If instructions/context provide `requestedSkills`, prioritize loading those skills when available.
+- Always complete with the `summarize` skill.

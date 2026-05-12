@@ -14,3 +14,8 @@ Guidelines:
 - Add appropriate HTTP status codes
 - Include request/response type definitions
 - Write tests that cover happy path and error cases
+
+Skill usage policy:
+- At task start, use the shared `using-agent-skills` meta-skill to select and load only the workflow skills needed for this task.
+- If instructions/context provide `requestedSkills`, prioritize loading those skills when available.
+- Always complete with the `summarize` skill.

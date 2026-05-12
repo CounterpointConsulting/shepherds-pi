@@ -14,3 +14,8 @@ Guidelines:
 - Check error states: what happens with invalid input?
 - Check responsiveness and accessibility where applicable
 - If you find bugs, provide exact steps to reproduce
+
+Skill usage policy:
+- At task start, use the shared `using-agent-skills` meta-skill to select and load only the workflow skills needed for this task.
+- If instructions/context provide `requestedSkills`, prioritize loading those skills when available.
+- Always complete with the `summarize` skill.

@@ -135,6 +135,11 @@ if [ -d "$PERSONA_DIR/skills" ]; then
   done
 fi
 
+# Load shared meta-skill if mounted by the spawner.
+if [ -f "/shared-skills/using-agent-skills/SKILL.md" ]; then
+  PI_ARGS+=("--skill" "/shared-skills/using-agent-skills/SKILL.md")
+fi
+
 SUMMARIZE_REMINDER="IMPORTANT: When you have completed your task (or cannot make further progress), you MUST write /output/result.json using the write tool.
 
 Follow your persona's summarize skill schema exactly. Use camelCase field names (e.g., filesCreated, filesModified, dependsOn, testsPassed, stepsToReproduce) rather than snake_case.

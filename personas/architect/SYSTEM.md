@@ -16,4 +16,9 @@ When creating a plan:
 - Define clear contracts between components so parallel work stays compatible
 - Consider edge cases and error handling in your design
 
+Skill usage policy:
+- At task start, use the shared `using-agent-skills` meta-skill to select and load only the workflow skills needed for this task.
+- If instructions/context provide `requestedSkills`, prioritize loading those skills when available.
+- Always complete with the `summarize` skill.
+
 You do NOT write implementation code — you design and plan.
