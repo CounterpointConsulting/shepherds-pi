@@ -193,7 +193,11 @@ async function main() {
       gitToken,
       config,
       onEvent: (event) => {
-        // Surface container stderr for diagnosis
+        // Surface container lifecycle/stderr for diagnosis
+        if (event.type === 'container_started') {
+          console.log(`  📦 Container started: ${event.containerName}`);
+          return;
+        }
         if (event.type === 'container_stderr') {
           console.log(`  📦 ${event.line}`);
           return;

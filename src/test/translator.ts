@@ -230,9 +230,33 @@ console.log('Test 6: tool_execution_start → tool_notification with toolName me
   console.log('  ✓ tool_execution_start → tool_notification');
 }
 
-// ─── Test 7: bus agent_completed carries notifyNow + refresh-agents ──
+// ─── Test 7: bus agent_event(container_started) emits combined spawn message ──
 
-console.log('Test 7: bus agent_completed → refresh-agents + notifyNow message...');
+console.log('Test 7: bus agent_event(container_started) → combined spawn message...');
+{
+  const ctx = freshCtx();
+  const snap = freshSnapshot();
+  const deltas = translateBusEvent(snap, {
+    type: 'agent_event',
+    agentId: 'dba-abcd',
+    event: { type: 'container_started', containerName: 'silly-gardener' },
+  } as OrchestratorEvent, ctx);
+
+  assert(deltas.some(d => d.kind === 'refresh-agents'), 'refresh-agents present');
+  const msgDelta = deltas.find(d => d.kind === 'add-message');
+  assert(msgDelta && msgDelta.kind === 'add-message', 'add-message present');
+  if (msgDelta && msgDelta.kind === 'add-message') {
+    assertEq(msgDelta.message.meta?.toolName, 'spawn_agent', 'meta.toolName');
+    assertEq(msgDelta.message.meta?.agentId, 'dba-abcd', 'meta.agentId');
+    assert(msgDelta.message.content.includes('silly-gardener'), 'container name included');
+    assert(msgDelta.message.content.includes('Agent spawned'), 'spawn text included');
+  }
+  console.log('  ✓ combined spawn message includes container name');
+}
+
+// ─── Test 8: bus agent_completed carries notifyNow + refresh-agents ──
+
+console.log('Test 8: bus agent_completed → refresh-agents + notifyNow message...');
 {
   const ctx = freshCtx();
   const snap = freshSnapshot();
@@ -252,9 +276,9 @@ console.log('Test 7: bus agent_completed → refresh-agents + notifyNow message.
   console.log('  ✓ agent_completed → refresh + notifyNow');
 }
 
-// ─── Test 8: bus user_question sets ask-user pending + notifyNow msg ─
+// ─── Test 9: bus user_question sets ask-user pending + notifyNow msg ─
 
-console.log('Test 8: bus user_question → set-ask-user + notifyNow message...');
+console.log('Test 9: bus user_question → set-ask-user + notifyNow message...');
 {
   const ctx = freshCtx();
   const snap = freshSnapshot();
@@ -278,9 +302,9 @@ console.log('Test 8: bus user_question → set-ask-user + notifyNow message...')
   console.log('  ✓ user_question → pending ask_user + notifyNow');
 }
 
-// ─── Test 9: snapshot reference equality on no-op events ─────────
+// ─── Test 10: snapshot reference equality on no-op events ─────────
 
-console.log('Test 9: no-op events return same snapshot reference...');
+console.log('Test 10: no-op events return same snapshot reference...');
 {
   const ctx = freshCtx();
   const snap = freshSnapshot();
@@ -291,9 +315,9 @@ console.log('Test 9: no-op events return same snapshot reference...');
   console.log('  ✓ no-op events return no deltas (snapshot reference preserved upstream)');
 }
 
-// ─── Test 10: streaming message_update is ignored ───────────────
+// ─── Test 11: streaming message_update is ignored ───────────────
 
-console.log('Test 10: message_update is ignored (prevents flicker)...');
+console.log('Test 11: message_update is ignored (prevents flicker)...');
 {
   const ctx = freshCtx();
   const snap = freshSnapshot();
@@ -305,9 +329,9 @@ console.log('Test 10: message_update is ignored (prevents flicker)...');
   console.log('  ✓ message_update ignored');
 }
 
-// ─── Test 11: thinking-only message_end shows preview ───────────
+// ─── Test 12: thinking-only message_end shows preview ───────────
 
-console.log('Test 11: thinking-only message_end → thinking preview...');
+console.log('Test 12: thinking-only message_end → thinking preview...');
 {
   const ctx = freshCtx();
   let snap = freshSnapshot();

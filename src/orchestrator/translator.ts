@@ -275,22 +275,7 @@ export function translateBusEvent(
       return [{ kind: 'refresh-plan' }];
 
     case 'agent_spawned':
-      return [
-        { kind: 'refresh-agents' },
-        {
-          kind: 'add-message',
-          message: makeToolMessage(
-            ctx,
-            `🔧 Agent spawned: ${event.agentId} (${event.persona})${event.branch ? ` on ${event.branch}` : ''}`,
-            {
-              toolName: 'spawn_agent',
-              agentId: event.agentId,
-              persona: event.persona,
-              branch: event.branch,
-            },
-          ),
-        },
-      ];
+      return [{ kind: 'refresh-agents' }];
 
     case 'agent_completed': {
       const summary = (event.result as { summary?: string })?.summary ?? 'done';
@@ -324,6 +309,24 @@ export function translateBusEvent(
 
     case 'agent_event': {
       const inner = event.event as Record<string, unknown>;
+
+      if (inner?.type === 'container_started' && typeof inner.containerName === 'string') {
+        const persona = typeof inner.persona === 'string' ? inner.persona : undefined;
+        const branch = typeof inner.branch === 'string' ? inner.branch : undefined;
+
+        return [
+          { kind: 'refresh-agents' },
+          {
+            kind: 'add-message',
+            message: makeToolMessage(
+              ctx,
+              `🔧 Agent spawned: ${event.agentId}${persona ? ` (${persona})` : ''} as container ${inner.containerName}${branch ? ` on ${branch}` : ''}`,
+              { toolName: 'spawn_agent', agentId: event.agentId, persona, branch },
+            ),
+          },
+        ];
+      }
+
       if (inner?.type === 'container_stderr' && typeof inner.line === 'string') {
         return [{
           kind: 'add-message',

@@ -261,6 +261,20 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
       gitToken,
       config,
       onEvent: (event) => {
+        if (event.type === 'container_started' && typeof event.containerName === 'string') {
+          db.updateAgentContainer(agentId, event.containerName);
+          eventBus.emit({
+            type: 'agent_event',
+            agentId,
+            event: {
+              ...event,
+              persona: persona.name,
+              branch: branchName,
+            },
+          });
+          return;
+        }
+
         eventBus.emit({ type: 'agent_event', agentId, event });
       },
     });

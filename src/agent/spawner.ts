@@ -5,6 +5,7 @@ import os from 'node:os';
 import type { PersonaConfig } from '../persona/index.js';
 import type { ShepherdsPiConfig, RepoMode, GitOpsMode } from '../config/index.js';
 import { getModuleDir } from '../utils.js';
+import { generateFunnyContainerName } from './container-name.js';
 
 export interface SpawnOptions {
   agentId: string;
@@ -31,6 +32,7 @@ export interface SpawnResult {
   result: AgentResultJson | null;
   events: Record<string, unknown>[];
   timedOut: boolean;
+  containerName: string;
 }
 
 export interface AgentResultJson {
@@ -129,12 +131,11 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   }
 
   // ─── 4. Container config ─────────────────────────────────────
-  const containerName = `shepherds-pi-${opts.agentId}`;
   const timeoutMs = opts.config.agent.timeoutMinutes * 60 * 1000;
+  const maxNameAttempts = 12;
 
-  const container = await docker.createContainer({
+  const containerCreateBase = {
     Image: opts.config.docker.image,
-    name: containerName,
     Env: env,
     User: '1000:1000',
     HostConfig: {
@@ -154,9 +155,34 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     Tty: false,
     OpenStdin: false,
     StdinOnce: false,
-  });
+  };
+
+  let containerName = '';
+  let container: Docker.Container | null = null;
+
+  for (let attempt = 1; attempt <= maxNameAttempts; attempt++) {
+    containerName = generateFunnyContainerName();
+
+    try {
+      container = await docker.createContainer({
+        ...containerCreateBase,
+        name: containerName,
+      });
+      break;
+    } catch (err: unknown) {
+      if (isContainerNameConflict(err) && attempt < maxNameAttempts) {
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  if (!container) {
+    throw new Error(`spawnAgent: could not generate a unique container name after ${maxNameAttempts} attempts`);
+  }
 
   await container.start();
+  opts.onEvent?.({ type: 'container_started', containerName });
 
   // ─── 5. Timeout + abort enforcement ──────────────────────────
   // Kill the container after timeoutMinutes. Also honor an external
@@ -269,6 +295,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     result: agentResult,
     events,
     timedOut,
+    containerName,
   };
 }
 
@@ -418,4 +445,14 @@ function normalizeKeysDeep(value: unknown): unknown {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isContainerNameConflict(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+
+  const statusCode = (err as { statusCode?: unknown }).statusCode;
+  if (statusCode === 409) return true;
+
+  const message = (err as { message?: unknown }).message;
+  return typeof message === 'string' && message.toLowerCase().includes('name is already in use');
 }
