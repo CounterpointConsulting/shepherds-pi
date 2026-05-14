@@ -281,6 +281,15 @@ npx tsx src/test/notify.ts           # Notification scheduler
 npx tsx src/test/worktree-manager.ts # Worktree + lock behavior
 npx tsx src/test/host-git-manager.ts # Host git finalization
 
+# E2E worktree handoff cycle (Docker required, no API keys required)
+npm run test:e2e:worktree
+
+# E2E clone + in-container git handoff cycle (Docker required, no API keys required)
+npm run test:e2e:clone
+
+# Run both E2E architecture-mode tests
+npm run test:e2e
+
 # E2E agent test (needs Docker + API keys)
 npx tsx src/test/spawn-agent.ts code-reviewer "Review package.json"
 npx tsx src/test/spawn-agent.ts architect "Analyze this codebase"

@@ -10,7 +10,10 @@
     "docker:build": "tsx src/scripts/docker-build.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx src/test/foundation.ts && tsx src/test/orchestrator.ts && tsx src/test/manager.ts && tsx src/test/sanitize.ts && tsx src/test/translator.ts && tsx src/test/notify.ts && tsx src/test/worktree-manager.ts && tsx src/test/host-git-manager.ts",
-    "test:agent": "tsx src/test/spawn-agent.ts"
+    "test:agent": "tsx src/test/spawn-agent.ts",
+    "test:e2e:worktree": "tsx src/test/e2e-worktree-handoffs.ts",
+    "test:e2e:clone": "tsx src/test/e2e-clone-container-handoffs.ts",
+    "test:e2e": "npm run test:e2e:worktree && npm run test:e2e:clone"
   },
   "dependencies": {
     "@mariozechner/pi-coding-agent": "^0.72.1",
