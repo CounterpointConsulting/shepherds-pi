@@ -36,6 +36,7 @@ Local CLI tool that automates software development by coordinating specialized A
 
 - **Orchestrator coordinates, never codes** — only has orchestration tools (spawn_agent, create_branch, read_plan, etc.), no read/write/edit/bash
 - **Agents are one-shot Docker containers** — spawned with a persona + instructions, write `/output/result.json` when done, container is removed
+- **Host-managed git supported via worktrees** — branch worktrees are prepared on host and mounted into containers
 - **All communication routed through Orchestrator** — agents never talk to each other
 - **Emergent flow** — Orchestrator reasons and decides next steps, not a rigid phase sequence
 - **Run log as external memory** — survives context compaction, queryable via `read_run_log` tool
@@ -208,17 +209,30 @@ agent:
   timeout_minutes: 30
   max_retries: 1
   git_token_env: GIT_TOKEN
+
+git:
+  repo_mode: worktree             # clone | worktree
+  git_ops_mode: host              # container | host
+  worktrees_dir: ./.shepherds-pi/worktrees
+  author_name: Shepherds Pi Agent
+  author_email: agent@shepherds-pi.dev
+  reset_worktree_before_run: true
 ```
+
+Notes:
+- `repo_mode=worktree` mounts a host-prepared branch worktree into `/workspace/repo`.
+- `git_ops_mode=host` disables in-container commit/push; the host commits/pushes after agent completion.
+- `git_ops_mode=host` requires `repo_mode=worktree`.
 
 ## Agent Lifecycle
 
 1. Orchestrator calls `spawn_agent(persona, instructions, branch)`
 2. Spawner creates Docker container with persona + instructions mounted
-3. Entrypoint clones the repo on the target branch
+3. Entrypoint either clones the repo (clone mode) or uses a host-mounted branch worktree (worktree mode)
 4. Pi runs inside the container with `--mode json --print`
 5. Agent uses coding tools (read, write, edit, bash) to complete the task
 6. Agent writes `/output/result.json` with structured result
-7. Entrypoint commits and pushes changes
+7. Git finalization happens either in-container (container mode) or on-host (host mode)
 8. Spawner reads `result.json` from the mounted output directory
 9. Container is removed, result returns to the Orchestrator
 

@@ -29,6 +29,18 @@ export interface AgentConfig {
   gitTokenEnv: string;
 }
 
+export type RepoMode = 'clone' | 'worktree';
+export type GitOpsMode = 'container' | 'host';
+
+export interface GitConfig {
+  repoMode: RepoMode;
+  gitOpsMode: GitOpsMode;
+  worktreesDir: string;
+  authorName: string;
+  authorEmail: string;
+  resetWorktreeBeforeRun: boolean;
+}
+
 export interface ShepherdsPiConfig {
   version: number;
   project: ProjectConfig;
@@ -37,6 +49,7 @@ export interface ShepherdsPiConfig {
   coordinator: CoordinatorConfig;
   personasDir: string;
   agent: AgentConfig;
+  git: GitConfig;
 }
 
 /**
@@ -80,6 +93,7 @@ export function loadConfig(configPath: string): ShepherdsPiConfig {
   const openrouter = parsed.openrouter as Record<string, unknown> ?? {};
   const coordinator = parsed.coordinator as Record<string, unknown> ?? {};
   const agent = parsed.agent as Record<string, unknown> ?? {};
+  const git = parsed.git as Record<string, unknown> ?? {};
 
   const configDir = path.dirname(path.resolve(configPath));
 
@@ -128,6 +142,14 @@ export function loadConfig(configPath: string): ShepherdsPiConfig {
       timeoutMinutes: (agent.timeout_minutes as number) ?? 30,
       maxRetries: (agent.max_retries as number) ?? 1,
       gitTokenEnv: (agent.git_token_env as string) ?? 'GIT_TOKEN',
+    },
+    git: {
+      repoMode: ((git.repo_mode as string) === 'worktree' ? 'worktree' : 'clone'),
+      gitOpsMode: ((git.git_ops_mode as string) === 'host' ? 'host' : 'container'),
+      worktreesDir: path.resolve(configDir, (git.worktrees_dir as string) ?? './.shepherds-pi/worktrees'),
+      authorName: (git.author_name as string) ?? 'Shepherds Pi Agent',
+      authorEmail: (git.author_email as string) ?? 'agent@shepherds-pi.dev',
+      resetWorktreeBeforeRun: (git.reset_worktree_before_run as boolean) ?? true,
     },
   };
 }

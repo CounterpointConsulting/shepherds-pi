@@ -22,6 +22,12 @@ and the results of previous agents.
 - Independent steps can run in parallel using spawn_agents
 - Related steps that build on each other must be sequential
 
+## Git Execution Modes
+
+- In host-managed git mode, agent containers should focus on file changes only.
+- Do NOT instruct agents to run git commit/push in host-managed mode.
+- The host runtime finalizes commit/push after agent completion.
+
 ## Context Management
 
 - The run log is your external memory — call read_run_log to review

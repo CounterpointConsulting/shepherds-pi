@@ -9,7 +9,7 @@
     "start": "node dist/index.js",
     "docker:build": "tsx src/scripts/docker-build.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/test/foundation.ts && tsx src/test/orchestrator.ts && tsx src/test/manager.ts && tsx src/test/sanitize.ts && tsx src/test/translator.ts && tsx src/test/notify.ts",
+    "test": "tsx src/test/foundation.ts && tsx src/test/orchestrator.ts && tsx src/test/manager.ts && tsx src/test/sanitize.ts && tsx src/test/translator.ts && tsx src/test/notify.ts && tsx src/test/worktree-manager.ts && tsx src/test/host-git-manager.ts",
     "test:agent": "tsx src/test/spawn-agent.ts"
   },
   "dependencies": {

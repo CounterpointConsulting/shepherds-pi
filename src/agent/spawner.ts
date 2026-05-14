@@ -3,7 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import type { PersonaConfig } from '../persona/index.js';
-import type { ShepherdsPiConfig } from '../config/index.js';
+import type { ShepherdsPiConfig, RepoMode, GitOpsMode } from '../config/index.js';
 import { getModuleDir } from '../utils.js';
 
 export interface SpawnOptions {
@@ -12,8 +12,11 @@ export interface SpawnOptions {
   instructions: string;
   context?: string;
   branch?: string;
-  gitUrl: string;
-  gitToken: string;
+  repoMode: RepoMode;
+  gitOpsMode: GitOpsMode;
+  worktreePath?: string;
+  gitUrl?: string;
+  gitToken?: string;
   config: ShepherdsPiConfig;
   /** Abort signal to cancel the agent mid-run (also triggers container.kill) */
   signal?: AbortSignal;
@@ -60,6 +63,17 @@ export interface AgentResultJson {
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const docker = new Docker();
 
+  const branchName = opts.branch ?? opts.config.project.devBranch;
+  const repoModeEnv = opts.repoMode === 'worktree' ? 'mounted' : 'clone';
+
+  if (opts.repoMode === 'clone' && !opts.gitUrl) {
+    throw new Error('spawnAgent: gitUrl is required in clone repo mode');
+  }
+
+  if (opts.repoMode === 'worktree' && !opts.worktreePath) {
+    throw new Error('spawnAgent: worktreePath is required in worktree repo mode');
+  }
+
   // ─── 1. Temp workspace on host ───────────────────────────────
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shepherds-pi-agent-'));
   const instructionsFile = path.join(tmpDir, 'instructions.txt');
@@ -74,7 +88,10 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   const gitTokenFile = path.join(secretsDir, 'git_token');
   const openrouterKeyFile = path.join(secretsDir, 'openrouter_key');
-  fs.writeFileSync(gitTokenFile, opts.gitToken, { encoding: 'utf-8', mode: 0o600 });
+  const needsGitToken = opts.repoMode === 'clone' || opts.gitOpsMode === 'container';
+  if (needsGitToken) {
+    fs.writeFileSync(gitTokenFile, opts.gitToken ?? '', { encoding: 'utf-8', mode: 0o600 });
+  }
   fs.writeFileSync(openrouterKeyFile, opts.config.openrouter.apiKey, { encoding: 'utf-8', mode: 0o600 });
 
   try { fs.chmodSync(outputDir, 0o777); } catch { /* best effort */ }
@@ -84,8 +101,10 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   // ─── 2. Container env (NO secrets here) ──────────────────────
   const env: string[] = [
-    `GIT_URL=${opts.gitUrl}`,
-    `BRANCH_NAME=${opts.branch ?? opts.config.project.devBranch}`,
+    `REPO_MODE=${repoModeEnv}`,
+    `GIT_OPS_MODE=${opts.gitOpsMode}`,
+    `GIT_URL=${opts.gitUrl ?? ''}`,
+    `BRANCH_NAME=${branchName}`,
     `PERSONA_DIR=/persona`,
     `INSTRUCTIONS_FILE=/tmp/instructions.txt`,
     `CONTEXT_FILE=/tmp/context.txt`,
@@ -100,6 +119,10 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     `${outputDir}:/output`,
     `${secretsDir}:/run/secrets:ro`,
   ];
+
+  if (opts.repoMode === 'worktree' && opts.worktreePath) {
+    binds.push(`${opts.worktreePath}:/workspace/repo`);
+  }
 
   if (hasSharedUsingAgentSkills) {
     binds.push(`${sharedUsingAgentSkillsDir}:/shared-skills/using-agent-skills:ro`);

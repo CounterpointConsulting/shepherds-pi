@@ -23,3 +23,11 @@ agent:
   timeout_minutes: 30
   max_retries: 1
   git_token_env: GIT_TOKEN
+
+git:
+  repo_mode: worktree
+  git_ops_mode: host
+  worktrees_dir: ./.shepherds-pi/worktrees
+  author_name: Shepherds Pi Agent
+  author_email: agent@shepherds-pi.dev
+  reset_worktree_before_run: true

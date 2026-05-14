@@ -6,6 +6,8 @@ import type { ShepherdsPiConfig } from '../config/index.js';
 import { getGitToken } from '../config/index.js';
 import { loadPersona } from '../persona/index.js';
 import { spawnAgent } from '../agent/spawner.js';
+import { WorktreeManager, type WorktreeLease } from '../git/worktree-manager.js';
+import { finalizeAgentChanges } from '../git/host-git-manager.js';
 import simpleGit from 'simple-git';
 import crypto from 'node:crypto';
 
@@ -19,9 +21,17 @@ export function createOrchestratorTools(deps: {
 }): ToolDefinition[] {
   const { eventBus, db, config, getRunId } = deps;
 
+  const worktreeManager = config.git.repoMode === 'worktree'
+    ? new WorktreeManager({
+      repoPath: config.project.repoPath,
+      worktreesDir: config.git.worktreesDir,
+      resetBeforeRun: config.git.resetWorktreeBeforeRun,
+    })
+    : null;
+
   return [
-    createSpawnAgentTool(eventBus, db, config, getRunId),
-    createSpawnAgentsTool(eventBus, db, config, getRunId),
+    createSpawnAgentTool(eventBus, db, config, getRunId, worktreeManager),
+    createSpawnAgentsTool(eventBus, db, config, getRunId, worktreeManager),
     createBranchTool(eventBus, config),
     listBranchesTool(config),
     getBranchDiffTool(config),
@@ -84,11 +94,278 @@ const UpdateGoalStatusParams = Type.Object({
 
 // ─── spawn_agent ─────────────────────────────────────────────────
 
+function assertGitModeCompatibility(config: ShepherdsPiConfig): void {
+  if (config.git.gitOpsMode === 'host' && config.git.repoMode !== 'worktree') {
+    throw new Error('git.git_ops_mode=host requires git.repo_mode=worktree');
+  }
+}
+
+function normalizeRemoteUrl(url: string): string {
+  if (!url) return '';
+  if (url.startsWith('git@')) {
+    return url.replace('git@github.com:', 'https://github.com/').replace(/\.git$/, '');
+  }
+  return url;
+}
+
+async function resolveGitUrl(config: ShepherdsPiConfig): Promise<string> {
+  let gitUrl = process.env.GIT_URL ?? '';
+  if (gitUrl) return normalizeRemoteUrl(gitUrl);
+
+  try {
+    const git = simpleGit(config.project.repoPath);
+    gitUrl = (await git.getRemotes(true)).find(r => r.name === 'origin')?.refs?.fetch ?? '';
+    return normalizeRemoteUrl(gitUrl);
+  } catch {
+    return '';
+  }
+}
+
+async function resolveGitToken(config: ShepherdsPiConfig): Promise<string> {
+  const needsToken = config.git.repoMode === 'clone' || config.git.gitOpsMode === 'container';
+  if (!needsToken) return '';
+  return getGitToken(config.agent.gitTokenEnv);
+}
+
+async function acquireWorktreeLease(
+  worktreeManager: WorktreeManager | null,
+  config: ShepherdsPiConfig,
+  branch: string,
+  agentId: string,
+): Promise<WorktreeLease | null> {
+  if (config.git.repoMode !== 'worktree') return null;
+  if (!worktreeManager) throw new Error('Worktree mode enabled, but no worktree manager is configured.');
+  return worktreeManager.acquire({
+    branch,
+    baseBranch: config.project.devBranch,
+    agentId,
+  });
+}
+
+type HostGitFinalizeOutcome = Awaited<ReturnType<typeof finalizeAgentChanges>>;
+type SpawnLogMode = 'single' | 'parallel';
+
+interface ExecuteAgentSpec {
+  eventBus: OrchestratorEventBus;
+  db: ShepherdsDB;
+  config: ShepherdsPiConfig;
+  worktreeManager: WorktreeManager | null;
+  runId: string;
+  personaName: string;
+  instructions: string;
+  context?: string;
+  branch?: string;
+  logMode: SpawnLogMode;
+}
+
+type ExecuteAgentResult =
+  | {
+    ok: true;
+    agentId: string;
+    spawnResult: Awaited<ReturnType<typeof spawnAgent>>;
+    status: 'done' | 'failed';
+    hostGit: HostGitFinalizeOutcome | null;
+  }
+  | {
+    ok: false;
+    agentId?: string;
+    error: string;
+  };
+
+async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResult> {
+  const {
+    eventBus,
+    db,
+    config,
+    worktreeManager,
+    runId,
+    personaName,
+    instructions,
+    context,
+    branch,
+    logMode,
+  } = spec;
+
+  assertGitModeCompatibility(config);
+
+  const persona = loadPersona(personaName, `${config.personasDir}/${personaName}`);
+  if (!persona) {
+    return {
+      ok: false,
+      error: `Persona "${personaName}" not found`,
+    };
+  }
+
+  const agentId = `${personaName}-${crypto.randomUUID().substring(0, 8)}`;
+  const branchName = branch ?? config.project.devBranch;
+  let lease: WorktreeLease | null = null;
+
+  db.createAgentRun({
+    id: agentId,
+    run_id: runId,
+    step_id: null,
+    persona: persona.name,
+    model: persona.model,
+    instructions,
+    context: context ?? null,
+    branch: branchName,
+    container_id: null,
+    status: 'spawning',
+    result: null,
+    started_at: new Date().toISOString(),
+    completed_at: null,
+  });
+
+  const spawnSummary = logMode === 'parallel'
+    ? `Agent spawned (parallel): ${agentId} on ${branchName}`
+    : `Agent spawned: ${agentId} (${persona.name}) on ${branchName}`;
+
+  db.appendLog(runId, 'agent_spawned', { agentId, persona: persona.name, branch: branchName }, spawnSummary);
+  eventBus.emit({ type: 'agent_spawned', agentId, persona: persona.name, branch: branchName });
+
+  try {
+    lease = await acquireWorktreeLease(worktreeManager, config, branchName, agentId);
+    if (lease) {
+      db.appendLog(
+        runId,
+        'agent_worktree_acquired',
+        { agentId, leaseId: lease.leaseId, branch: lease.branch, worktreePath: lease.worktreePath },
+        `Worktree acquired for ${agentId} on ${lease.branch}`,
+      );
+      eventBus.emit({
+        type: 'agent_event',
+        agentId,
+        event: { type: 'worktree_acquired', branch: lease.branch, worktreePath: lease.worktreePath },
+      });
+    }
+
+    const gitUrl = config.git.repoMode === 'clone' ? await resolveGitUrl(config) : undefined;
+    if (config.git.repoMode === 'clone' && !gitUrl) {
+      throw new Error('Could not determine git URL for clone mode. Set GIT_URL or configure origin remote.');
+    }
+
+    const gitToken = await resolveGitToken(config);
+
+    db.updateAgentStatus(agentId, 'running');
+
+    const spawnResult = await spawnAgent({
+      agentId,
+      persona,
+      instructions,
+      context,
+      branch: branchName,
+      repoMode: config.git.repoMode,
+      gitOpsMode: config.git.gitOpsMode,
+      worktreePath: lease?.worktreePath,
+      gitUrl,
+      gitToken,
+      config,
+      onEvent: (event) => {
+        eventBus.emit({ type: 'agent_event', agentId, event });
+      },
+    });
+
+    let status: 'done' | 'failed' = spawnResult.exitCode === 0 ? 'done' : 'failed';
+    let failReason = spawnResult.timedOut
+      ? `Timed out after ${config.agent.timeoutMinutes} minutes`
+      : `Exit code ${spawnResult.exitCode}`;
+
+    let hostGit: HostGitFinalizeOutcome | null = null;
+
+    if (status === 'done' && config.git.gitOpsMode === 'host') {
+      if (!lease) {
+        status = 'failed';
+        failReason = 'Host git finalization requested, but no worktree lease was acquired.';
+      } else {
+        try {
+          hostGit = await finalizeAgentChanges({
+            worktreePath: lease.worktreePath,
+            branch: branchName,
+            persona: persona.name,
+            agentId,
+            result: spawnResult.result,
+            authorName: config.git.authorName,
+            authorEmail: config.git.authorEmail,
+          });
+
+          db.appendLog(
+            runId,
+            'agent_host_git_finalized',
+            { agentId, ...hostGit },
+            hostGit.changed
+              ? `Host git finalized for ${agentId} (${hostGit.commitSha?.slice(0, 8) ?? 'no sha'})`
+              : `Host git found no file changes for ${agentId}`,
+          );
+
+          eventBus.emit({
+            type: 'agent_event',
+            agentId,
+            event: { type: 'host_git_finalized', ...hostGit },
+          });
+        } catch (err: unknown) {
+          status = 'failed';
+          const message = err instanceof Error ? err.message : String(err);
+          failReason = `Host git finalize failed: ${message}`;
+          eventBus.emit({
+            type: 'agent_event',
+            agentId,
+            event: { type: 'host_git_failed', error: message },
+          });
+        }
+      }
+    }
+
+    db.updateAgentStatus(agentId, status, spawnResult.result ? JSON.stringify(spawnResult.result) : undefined);
+
+    if (status === 'done') {
+      const completedSummary = logMode === 'parallel'
+        ? `Agent completed: ${agentId}`
+        : `Agent completed: ${agentId} — ${spawnResult.result?.summary ?? 'no summary'}`;
+
+      db.appendLog(runId, 'agent_completed', { agentId }, completedSummary);
+      eventBus.emit({ type: 'agent_completed', agentId, result: spawnResult.result });
+    } else {
+      db.appendLog(runId, 'agent_failed', { agentId, exitCode: spawnResult.exitCode, timedOut: spawnResult.timedOut }, `Agent failed: ${agentId} — ${failReason}`);
+      eventBus.emit({ type: 'agent_failed', agentId, error: failReason });
+    }
+
+    return {
+      ok: true,
+      agentId,
+      spawnResult,
+      status,
+      hostGit,
+    };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    db.updateAgentStatus(agentId, 'failed');
+    db.appendLog(runId, 'agent_failed', { agentId, error: message }, `Agent failed: ${agentId} — ${message}`);
+    eventBus.emit({ type: 'agent_failed', agentId, error: message });
+
+    return {
+      ok: false,
+      agentId,
+      error: message,
+    };
+  } finally {
+    if (lease) {
+      worktreeManager?.release(lease.leaseId);
+      db.appendLog(
+        runId,
+        'agent_worktree_released',
+        { agentId, leaseId: lease.leaseId, branch: lease.branch },
+        `Worktree released for ${agentId} on ${lease.branch}`,
+      );
+    }
+  }
+}
+
 function createSpawnAgentTool(
   eventBus: OrchestratorEventBus,
   db: ShepherdsDB,
   config: ShepherdsPiConfig,
   getRunId: () => string,
+  worktreeManager: WorktreeManager | null,
 ): ToolDefinition<typeof SpawnAgentParams> {
   return defineTool({
     name: 'spawn_agent',
@@ -102,97 +379,41 @@ function createSpawnAgentTool(
       const { persona: personaName, instructions, branch, context } = params;
       const runId = getRunId();
 
-      const persona = loadPersona(personaName, `${config.personasDir}/${personaName}`);
-      if (!persona) {
+      const outcome = await executeAgentRun({
+        eventBus,
+        db,
+        config,
+        worktreeManager,
+        runId,
+        personaName,
+        instructions,
+        context,
+        branch,
+        logMode: 'single',
+      });
+
+      if (!outcome.ok) {
         return {
-          content: [{ type: 'text' as const, text: `Error: Persona "${personaName}" not found.` }],
+          content: [{ type: 'text' as const, text: `Error spawning agent: ${outcome.error}` }],
           details: { error: true } as unknown as Record<string, unknown>,
         };
       }
 
-      const agentId = `${personaName}-${crypto.randomUUID().substring(0, 8)}`;
+      const { agentId, spawnResult, status, hostGit } = outcome;
+      const resultText = spawnResult.result
+        ? JSON.stringify(spawnResult.result, null, 2)
+        : `Agent ${spawnResult.timedOut ? 'timed out' : `exited with code ${spawnResult.exitCode}`}. No structured result was produced.`;
 
-      db.createAgentRun({
-        id: agentId,
-        run_id: runId,
-        step_id: null,
-        persona: persona.name,
-        model: persona.model,
-        instructions,
-        context: context ?? null,
-        branch: branch ?? null,
-        container_id: null,
-        status: 'spawning',
-        result: null,
-        started_at: new Date().toISOString(),
-        completed_at: null,
-      });
-
-      db.appendLog(runId, 'agent_spawned', { agentId, persona: persona.name, branch }, `Agent spawned: ${agentId} (${persona.name})${branch ? ` on ${branch}` : ''}`);
-      eventBus.emit({ type: 'agent_spawned', agentId, persona: persona.name, branch });
-
-      let gitUrl = process.env.GIT_URL ?? '';
-      if (!gitUrl) {
-        try {
-          const git = simpleGit(config.project.repoPath);
-          gitUrl = (await git.getRemotes(true)).find(r => r.name === 'origin')?.refs?.fetch ?? '';
-          if (gitUrl.startsWith('git@')) {
-            gitUrl = gitUrl.replace('git@github.com:', 'https://github.com/').replace(/\.git$/, '');
-          }
-        } catch { /* ignore */ }
-      }
-
-      const gitToken = await getGitToken(config.agent.gitTokenEnv);
-      db.updateAgentStatus(agentId, 'running');
-
-      try {
-        const result = await spawnAgent({
+      return {
+        content: [{ type: 'text' as const, text: resultText }],
+        details: {
           agentId,
-          persona,
-          instructions,
-          context,
-          gitUrl,
-          gitToken,
-          config,
-          onEvent: (event) => {
-            eventBus.emit({ type: 'agent_event', agentId, event });
-          },
-        });
-
-        const status = result.exitCode === 0 ? 'done' : 'failed';
-        db.updateAgentStatus(agentId, status, result.result ? JSON.stringify(result.result) : undefined);
-
-        const failReason = result.timedOut
-          ? `Timed out after ${config.agent.timeoutMinutes} minutes`
-          : `Exit code ${result.exitCode}`;
-
-        if (status === 'done') {
-          db.appendLog(runId, 'agent_completed', { agentId }, `Agent completed: ${agentId} — ${result.result?.summary ?? 'no summary'}`);
-          eventBus.emit({ type: 'agent_completed', agentId, result: result.result });
-        } else {
-          db.appendLog(runId, 'agent_failed', { agentId, exitCode: result.exitCode, timedOut: result.timedOut }, `Agent failed: ${agentId} — ${failReason}`);
-          eventBus.emit({ type: 'agent_failed', agentId, error: failReason });
-        }
-
-        const resultText = result.result
-          ? JSON.stringify(result.result, null, 2)
-          : `Agent ${result.timedOut ? 'timed out' : `exited with code ${result.exitCode}`}. No structured result was produced.`;
-
-        return {
-          content: [{ type: 'text' as const, text: resultText }],
-          details: { agentId, exitCode: result.exitCode, status, timedOut: result.timedOut } as Record<string, unknown>,
-        };
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        db.updateAgentStatus(agentId, 'failed');
-        db.appendLog(runId, 'agent_failed', { agentId, error: message }, `Agent failed: ${agentId} — ${message}`);
-        eventBus.emit({ type: 'agent_failed', agentId, error: message });
-
-        return {
-          content: [{ type: 'text' as const, text: `Error spawning agent: ${message}` }],
-          details: { agentId, error: true } as unknown as Record<string, unknown>,
-        };
-      }
+          exitCode: spawnResult.exitCode,
+          status,
+          timedOut: spawnResult.timedOut,
+          hostGit,
+        } as Record<string, unknown>,
+      };
     },
   });
 }
@@ -204,6 +425,7 @@ function createSpawnAgentsTool(
   db: ShepherdsDB,
   config: ShepherdsPiConfig,
   getRunId: () => string,
+  worktreeManager: WorktreeManager | null,
 ): ToolDefinition<typeof SpawnAgentsParams> {
   return defineTool({
     name: 'spawn_agents',
@@ -219,63 +441,32 @@ function createSpawnAgentsTool(
 
       const results = await Promise.allSettled(
         agents.map(async (agentSpec, index) => {
-          const persona = loadPersona(agentSpec.persona, `${config.personasDir}/${agentSpec.persona}`);
-          if (!persona) return { index, error: `Persona "${agentSpec.persona}" not found` };
-
-          const agentId = `${agentSpec.persona}-${crypto.randomUUID().substring(0, 8)}`;
-
-          db.createAgentRun({
-            id: agentId, run_id: runId, step_id: null, persona: persona.name,
-            model: persona.model, instructions: agentSpec.instructions,
-            context: agentSpec.context ?? null, branch: agentSpec.branch ?? null,
-            container_id: null, status: 'spawning', result: null,
-            started_at: new Date().toISOString(), completed_at: null,
+          const outcome = await executeAgentRun({
+            eventBus,
+            db,
+            config,
+            worktreeManager,
+            runId,
+            personaName: agentSpec.persona,
+            instructions: agentSpec.instructions,
+            context: agentSpec.context,
+            branch: agentSpec.branch,
+            logMode: 'parallel',
           });
 
-          db.appendLog(runId, 'agent_spawned', { agentId, persona: persona.name }, `Agent spawned (parallel): ${agentId}`);
-          eventBus.emit({ type: 'agent_spawned', agentId, persona: persona.name, branch: agentSpec.branch });
-
-          let gitUrl = process.env.GIT_URL ?? '';
-          if (!gitUrl) {
-            try {
-              const git = simpleGit(config.project.repoPath);
-              gitUrl = (await git.getRemotes(true)).find(r => r.name === 'origin')?.refs?.fetch ?? '';
-              if (gitUrl.startsWith('git@')) {
-                gitUrl = gitUrl.replace('git@github.com:', 'https://github.com/').replace(/\.git$/, '');
-              }
-            } catch { /* ignore */ }
+          if (!outcome.ok) {
+            return { index, agentId: outcome.agentId, error: outcome.error };
           }
 
-          const gitToken = await getGitToken(config.agent.gitTokenEnv);
-          db.updateAgentStatus(agentId, 'running');
-
-          try {
-            const result = await spawnAgent({
-              agentId, persona, instructions: agentSpec.instructions,
-              context: agentSpec.context, gitUrl, gitToken, config,
-              onEvent: (event) => { eventBus.emit({ type: 'agent_event', agentId, event }); },
-            });
-
-            const status = result.exitCode === 0 ? 'done' : 'failed';
-            db.updateAgentStatus(agentId, status, result.result ? JSON.stringify(result.result) : undefined);
-
-            const failReason = result.timedOut
-              ? `Timed out after ${config.agent.timeoutMinutes} minutes`
-              : `Exit code ${result.exitCode}`;
-
-            if (status === 'done') {
-              eventBus.emit({ type: 'agent_completed', agentId, result: result.result });
-            } else {
-              eventBus.emit({ type: 'agent_failed', agentId, error: failReason });
-            }
-
-            return { index, agentId, result: result.result, exitCode: result.exitCode, timedOut: result.timedOut };
-          } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : String(err);
-            db.updateAgentStatus(agentId, 'failed');
-            eventBus.emit({ type: 'agent_failed', agentId, error: message });
-            return { index, agentId, error: message };
-          }
+          return {
+            index,
+            agentId: outcome.agentId,
+            result: outcome.spawnResult.result,
+            exitCode: outcome.spawnResult.exitCode,
+            timedOut: outcome.spawnResult.timedOut,
+            status: outcome.status,
+            hostGit: outcome.hostGit,
+          };
         })
       );
 
@@ -312,8 +503,20 @@ function createBranchTool(eventBus: OrchestratorEventBus, config: ShepherdsPiCon
       try {
         const git = simpleGit(config.project.repoPath);
         await git.fetch('origin');
-        await git.checkoutBranch(name, `origin/${baseBranch}`);
-        await git.push('origin', name, ['--set-upstream']);
+
+        let localBranchExists = true;
+        try {
+          const out = await git.raw(['rev-parse', '--verify', '--quiet', `refs/heads/${name}`]);
+          localBranchExists = out.trim().length > 0;
+        } catch {
+          localBranchExists = false;
+        }
+
+        if (!localBranchExists) {
+          await git.raw(['branch', name, `origin/${baseBranch}`]);
+        }
+
+        await git.push('origin', `${name}:${name}`, ['--set-upstream']);
         eventBus.emit({ type: 'branch_created', name, base: baseBranch });
 
         return {

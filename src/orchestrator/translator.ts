@@ -330,6 +330,35 @@ export function translateBusEvent(
           message: makeToolMessage(ctx, `📦 ${inner.line}`, { toolName: 'container' }),
         }];
       }
+
+      if (inner?.type === 'worktree_acquired') {
+        const branch = typeof inner.branch === 'string' ? inner.branch : 'unknown';
+        return [{
+          kind: 'add-message',
+          message: makeToolMessage(ctx, `🪵 Worktree acquired for ${branch}`, { toolName: 'spawn_agent', agentId: event.agentId }),
+        }];
+      }
+
+      if (inner?.type === 'host_git_finalized') {
+        const changed = inner.changed === true;
+        const summary = changed
+          ? `✅ Host git finalized for ${event.agentId}`
+          : `ℹ️ Host git: no file changes for ${event.agentId}`;
+        return [{
+          kind: 'add-message',
+          message: makeToolMessage(ctx, summary, { toolName: 'spawn_agent', agentId: event.agentId }),
+        }];
+      }
+
+      if (inner?.type === 'host_git_failed') {
+        const msg = typeof inner.error === 'string' ? inner.error : 'unknown error';
+        return [{
+          kind: 'add-message',
+          message: makeToolMessage(ctx, `❌ Host git finalize failed: ${msg}`, { toolName: 'spawn_agent', agentId: event.agentId }),
+          notifyNow: true,
+        }];
+      }
+
       return [];
     }
 

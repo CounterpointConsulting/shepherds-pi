@@ -8,11 +8,13 @@ export GIT_TERMINAL_PROMPT=0
 
 # Route all git credential requests through our askpass helper, which reads
 # from the tmpfs-mounted /run/secrets/git_token. The token is NEVER placed
-# into the clone URL or .git/config.
+# into clone URLs or .git/config.
 export GIT_ASKPASS=/usr/local/bin/git-askpass.sh
 
 # ─── Environment variables (passed by Orchestrator) ─────────────────────
-#   GIT_URL              - clean repository URL (no credentials)
+#   REPO_MODE            - clone | mounted
+#   GIT_OPS_MODE         - container | host
+#   GIT_URL              - clean repository URL (for clone mode)
 #   BRANCH_NAME          - branch to checkout (defaults to "dev")
 #   PERSONA_DIR          - path to persona config mount (default: /persona)
 #   INSTRUCTIONS_FILE    - path to instructions file mount
@@ -20,64 +22,105 @@ export GIT_ASKPASS=/usr/local/bin/git-askpass.sh
 #   MODEL                - model ID (e.g., openrouter/anthropic/claude-sonnet-4)
 #
 # Secrets are read from tmpfs, never from env:
-#   /run/secrets/git_token       - GitHub PAT
+#   /run/secrets/git_token       - GitHub PAT (needed for clone or container push)
 #   /run/secrets/openrouter_key  - OpenRouter API key
 
-echo "=== Shepherds Pi Agent ===" >&2
-echo "Persona: ${PERSONA_DIR:-/persona}" >&2
-echo "Model:   ${MODEL:-unknown}" >&2
-echo "Branch:  ${BRANCH_NAME:-dev}" >&2
-
-# ─── 1. Clone and checkout ──────────────────────────────────────
-
-if [ -z "${GIT_URL:-}" ]; then
-  echo '{"type":"error","message":"GIT_URL not set"}' >&2
-  exit 1
-fi
-
+REPO_MODE="${REPO_MODE:-clone}"
+GIT_OPS_MODE="${GIT_OPS_MODE:-container}"
 BRANCH_NAME="${BRANCH_NAME:-dev}"
 
-if [ ! -r /run/secrets/git_token ]; then
-  echo '{"type":"error","message":"No git token mounted at /run/secrets/git_token"}' >&2
-  exit 1
-fi
+echo "=== Shepherds Pi Agent ===" >&2
+echo "Persona:   ${PERSONA_DIR:-/persona}" >&2
+echo "Model:     ${MODEL:-unknown}" >&2
+echo "Branch:    ${BRANCH_NAME}" >&2
+echo "Repo mode: ${REPO_MODE}" >&2
+echo "Git ops:   ${GIT_OPS_MODE}" >&2
 
-echo "Cloning ${BRANCH_NAME} from ${GIT_URL}..." >&2
-
-# Git will call GIT_ASKPASS for credentials. The URL stays clean — no
-# token embedded — so .git/config after clone contains only $GIT_URL.
-CLONE_ERR=$(git clone --branch "$BRANCH_NAME" --single-branch --depth 50 "$GIT_URL" /workspace/repo 2>&1) || {
-  echo "Single-branch clone failed: $CLONE_ERR" >&2
-  echo "Trying full clone..." >&2
-  CLONE_ERR2=$(git clone --depth 50 "$GIT_URL" /workspace/repo 2>&1) || {
-    echo "Clone failed: $CLONE_ERR2" >&2
-    echo '{"type":"error","message":"git clone failed — check GIT_TOKEN and repo access"}' >&2
+prepare_repo_clone() {
+  if [ -z "${GIT_URL:-}" ]; then
+    echo '{"type":"error","message":"GIT_URL not set (required for clone mode)"}' >&2
     exit 1
-  }
-  cd /workspace/repo
-  if ! git checkout "$BRANCH_NAME" 2>/dev/null; then
-    git checkout -b "$BRANCH_NAME"
   fi
+
+  if [ ! -r /run/secrets/git_token ]; then
+    echo '{"type":"error","message":"No git token mounted at /run/secrets/git_token (required for clone mode)"}' >&2
+    exit 1
+  fi
+
+  echo "Cloning ${BRANCH_NAME} from ${GIT_URL}..." >&2
+
+  # Git will call GIT_ASKPASS for credentials. The URL stays clean — no
+  # token embedded — so .git/config after clone contains only $GIT_URL.
+  CLONE_ERR=$(git clone --branch "$BRANCH_NAME" --single-branch --depth 50 "$GIT_URL" /workspace/repo 2>&1) || {
+    echo "Single-branch clone failed: $CLONE_ERR" >&2
+    echo "Trying full clone..." >&2
+    CLONE_ERR2=$(git clone --depth 50 "$GIT_URL" /workspace/repo 2>&1) || {
+      echo "Clone failed: $CLONE_ERR2" >&2
+      echo '{"type":"error","message":"git clone failed — check GIT_TOKEN and repo access"}' >&2
+      exit 1
+    }
+    cd /workspace/repo
+    if ! git checkout "$BRANCH_NAME" 2>/dev/null; then
+      git checkout -b "$BRANCH_NAME"
+    fi
+  }
+
+  cd /workspace/repo
+
+  # Belt-and-suspenders: verify no credential ended up in the remote URL.
+  CURRENT_REMOTE=$(git remote get-url origin)
+  case "$CURRENT_REMOTE" in
+    *@*)
+      echo "WARNING: remote URL contains credentials, rewriting to clean URL" >&2
+      git remote set-url origin "$GIT_URL"
+      ;;
+  esac
 }
 
-cd /workspace/repo
+prepare_repo_mounted() {
+  if [ ! -d /workspace/repo ]; then
+    echo '{"type":"error","message":"Mounted repo mode requested, but /workspace/repo is missing"}' >&2
+    exit 1
+  fi
 
-# Belt-and-suspenders: verify no credential ended up in the remote URL
-# (would only happen if someone reverted the clone command above).
-CURRENT_REMOTE=$(git remote get-url origin)
-case "$CURRENT_REMOTE" in
-  *@*)
-    echo "WARNING: remote URL contains credentials, rewriting to clean URL" >&2
-    git remote set-url origin "$GIT_URL"
+  cd /workspace/repo
+  echo "Using mounted repository at /workspace/repo" >&2
+}
+
+# ─── 1. Prepare repository ───────────────────────────────────────
+
+case "$REPO_MODE" in
+  clone)
+    prepare_repo_clone
+    ;;
+  mounted)
+    prepare_repo_mounted
+    ;;
+  *)
+    echo "{\"type\":\"error\",\"message\":\"Unsupported REPO_MODE: $REPO_MODE\"}" >&2
+    exit 1
     ;;
 esac
 
-# ─── 2. Configure git identity ──────────────────────────────────
+# ─── 2. Configure git identity (container git mode only) ────────
 
-git config user.name "Shepherds Pi Agent"
-git config user.email "agent@shepherds-pi.dev"
+if [ "$GIT_OPS_MODE" = "container" ]; then
+  if [ ! -e .git ]; then
+    echo '{"type":"error","message":"Container git mode requires a git repository at /workspace/repo"}' >&2
+    exit 1
+  fi
 
-echo "Checked out: $(git rev-parse --short HEAD) on $(git branch --show-current)" >&2
+  git config user.name "Shepherds Pi Agent"
+  git config user.email "agent@shepherds-pi.dev"
+
+  CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || true)
+  if [ -z "$CURRENT_BRANCH" ]; then
+    CURRENT_BRANCH="detached"
+  fi
+  echo "Checked out: $(git rev-parse --short HEAD) on ${CURRENT_BRANCH}" >&2
+else
+  echo "Host-managed git mode: skipping in-container git identity/setup." >&2
+fi
 
 # ─── 3. Determine model ─────────────────────────────────────────
 
@@ -100,7 +143,6 @@ fi
 # has to live as an env var (for pi's process). It is NOT passed on the
 # command line (which would appear in `ps`), and it is NOT set in the
 # container's Docker Env (which would appear in `docker inspect`).
-# The key originates from /run/secrets/openrouter_key on a tmpfs mount.
 OPENROUTER_API_KEY="$(cat /run/secrets/openrouter_key)"
 export OPENROUTER_API_KEY
 
@@ -109,8 +151,7 @@ export OPENROUTER_API_KEY
 PI_ARGS=()
 PI_ARGS+=("--mode" "json")
 PI_ARGS+=("--model" "$MODEL_ARG")
-# NOTE: --api-key deliberately omitted — pi reads OPENROUTER_API_KEY
-# from env instead, so the key does not appear in argv.
+# NOTE: --api-key deliberately omitted — pi reads OPENROUTER_API_KEY from env.
 
 PERSONA_DIR="${PERSONA_DIR:-/persona}"
 
@@ -140,6 +181,12 @@ if [ -f "/shared-skills/using-agent-skills/SKILL.md" ]; then
   PI_ARGS+=("--skill" "/shared-skills/using-agent-skills/SKILL.md")
 fi
 
+if [ "$GIT_OPS_MODE" = "host" ]; then
+  GIT_REMINDER="Host-managed git mode is active. Do NOT run git commands (especially commit/push) in this container. The host will finalize git operations after you complete the task."
+else
+  GIT_REMINDER="Then commit and push any code changes to the current branch with an appropriate commit message."
+fi
+
 SUMMARIZE_REMINDER="IMPORTANT: When you have completed your task (or cannot make further progress), you MUST write /output/result.json using the write tool.
 
 Follow your persona's summarize skill schema exactly. Use camelCase field names (e.g., filesCreated, filesModified, dependsOn, testsPassed, stepsToReproduce) rather than snake_case.
@@ -148,7 +195,7 @@ Always include at least:
 - status
 - summary
 
-Then commit and push any code changes to the current branch with an appropriate commit message."
+${GIT_REMINDER}"
 
 PI_ARGS+=("--append-system-prompt" "$SUMMARIZE_REMINDER")
 
@@ -167,7 +214,7 @@ fi
 
 echo "Pi exited with code $EXIT_CODE" >&2
 
-# ─── 7. Verify result.json exists (fallback using jq, not python3) ──
+# ─── 7. Verify result.json exists (fallback using jq) ───────────
 
 if [ ! -f /output/result.json ]; then
   echo "Warning: /output/result.json not created by agent" >&2
@@ -178,23 +225,26 @@ if [ ! -f /output/result.json ]; then
       SUMMARY=$(echo "$LAST_MSG" \
         | jq -r '[.message.content[]? | select(.type == "text") | .text] | join(" ") | .[0:500]' \
         2>/dev/null || echo "Agent completed but did not produce a result file")
-      # Escape the summary for safe JSON embedding
       ESCAPED_SUMMARY=$(printf '%s' "$SUMMARY" | jq -Rs .)
       echo "{\"status\":\"partial\",\"summary\":$ESCAPED_SUMMARY}" > /output/result.json
     fi
   fi
 fi
 
-# ─── 8. Commit and push any changes ─────────────────────────────
+# ─── 8. Commit and push any changes (container mode only) ───────
 
-cd /workspace/repo
-if [ -n "$(git status --porcelain)" ]; then
-  git add -A
-  git commit -m "feat: agent changes for task" 2>/dev/null || true
+if [ "$GIT_OPS_MODE" = "container" ]; then
+  cd /workspace/repo
+  if [ -n "$(git status --porcelain)" ]; then
+    git add -A
+    git commit -m "feat: agent changes for task" 2>/dev/null || true
+  fi
+
+  # Push uses GIT_ASKPASS, so the token is read from tmpfs and never
+  # appears in the remote URL or argv.
+  git push origin HEAD 2>/dev/null || echo "Warning: push failed" >&2
+else
+  echo "Host-managed git mode: skipping commit/push in container." >&2
 fi
-
-# Push uses GIT_ASKPASS, so the token is read from tmpfs and never
-# appears in the remote URL or argv.
-git push origin HEAD 2>/dev/null || echo "Warning: push failed" >&2
 
 exit $EXIT_CODE

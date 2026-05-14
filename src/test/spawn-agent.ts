@@ -28,6 +28,8 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, findConfig, getGitToken } from '../config/index.js';
 import { loadPersona } from '../persona/index.js';
 import { spawnAgent, ensureImage } from '../agent/spawner.js';
+import { WorktreeManager, type WorktreeLease } from '../git/worktree-manager.js';
+import { finalizeAgentChanges } from '../git/host-git-manager.js';
 import { ShepherdsDB } from '../db/index.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -98,11 +100,15 @@ async function main() {
     }
   }
 
-  let gitToken = await getGitToken(config.agent.gitTokenEnv);
-  if (!gitToken) {
-    console.log(`\nWarning: ${config.agent.gitTokenEnv} not set. Clone will work for public repos, push will be skipped.`);
-  } else {
-    console.log(`Git token: ${gitToken.substring(0, 8)}...`);
+  let gitToken = '';
+  const needsGitToken = config.git.repoMode === 'clone' || config.git.gitOpsMode === 'container';
+  if (needsGitToken) {
+    gitToken = await getGitToken(config.agent.gitTokenEnv);
+    if (!gitToken) {
+      console.log(`\nWarning: ${config.agent.gitTokenEnv} not set. Clone may work for public repos, push may be skipped/fail.`);
+    } else {
+      console.log(`Git token: ${gitToken.substring(0, 8)}...`);
+    }
   }
 
   // ─── Ensure Docker image ──────────────────────────────────────
@@ -127,7 +133,21 @@ async function main() {
 
   // ─── Spawn agent ──────────────────────────────────────────────
   const agentId = `${personaName}-test-${Date.now()}`;
+  const branchName = process.env.SHEPHERDS_TEST_BRANCH
+    ?? (config.git.repoMode === 'worktree' ? `shepherds-test/${Date.now()}` : config.project.devBranch);
+
+  const worktreeManager = config.git.repoMode === 'worktree'
+    ? new WorktreeManager({
+      repoPath: config.project.repoPath,
+      worktreesDir: config.git.worktreesDir,
+      resetBeforeRun: config.git.resetWorktreeBeforeRun,
+    })
+    : null;
+
+  let lease: WorktreeLease | null = null;
+
   console.log(`\nSpawning agent: ${agentId}`);
+  console.log(`Branch: ${branchName}`);
   console.log(`Instructions: ${instructions}`);
   console.log('─'.repeat(50));
 
@@ -139,7 +159,7 @@ async function main() {
     model: persona.model,
     instructions,
     context: null,
-    branch: config.project.devBranch,
+    branch: branchName,
     container_id: null,
     status: 'spawning',
     result: null,
@@ -147,16 +167,29 @@ async function main() {
     completed_at: null,
   });
 
-  db.appendLog(runId, 'agent_spawned', { agentId, persona: persona.name }, `Agent spawned: ${agentId}`);
+  db.appendLog(runId, 'agent_spawned', { agentId, persona: persona.name, branch: branchName }, `Agent spawned: ${agentId}`);
 
   const startTime = Date.now();
 
   try {
+    if (worktreeManager) {
+      lease = await worktreeManager.acquire({
+        branch: branchName,
+        baseBranch: config.project.devBranch,
+        agentId,
+      });
+      console.log(`Using worktree: ${lease.worktreePath}`);
+    }
+
     const result = await spawnAgent({
       agentId,
       persona,
       instructions,
-      gitUrl,
+      branch: branchName,
+      repoMode: config.git.repoMode,
+      gitOpsMode: config.git.gitOpsMode,
+      worktreePath: lease?.worktreePath,
+      gitUrl: config.git.repoMode === 'clone' ? gitUrl : undefined,
       gitToken,
       config,
       onEvent: (event) => {
@@ -183,7 +216,7 @@ async function main() {
           console.log('[agent_end]');
         }
       },
-      onStdout: (line) => {
+      onStdout: () => {
         // Don't print raw JSON lines — the onEvent handler covers the interesting ones
       },
     });
@@ -193,25 +226,58 @@ async function main() {
     console.log('─'.repeat(50));
     console.log(`\nAgent exited with code: ${result.exitCode} (${elapsed}s)`);
 
+    let agentStatus: 'done' | 'failed' = 'failed';
+    if (result.result && result.exitCode === 0) {
+      agentStatus = (result.result.status === 'success' || result.result.status === 'approved') ? 'done' : 'failed';
+    }
+
+    if (agentStatus === 'done' && config.git.gitOpsMode === 'host') {
+      if (!lease) {
+        throw new Error('Host git mode enabled but no worktree lease is available for finalization.');
+      }
+
+      const hostGit = await finalizeAgentChanges({
+        worktreePath: lease.worktreePath,
+        branch: branchName,
+        persona: persona.name,
+        agentId,
+        result: result.result,
+        authorName: config.git.authorName,
+        authorEmail: config.git.authorEmail,
+      });
+
+      console.log(`Host git finalize: changed=${hostGit.changed}, pushed=${hostGit.pushed}, branch=${hostGit.branch}`);
+      if (hostGit.commitSha) {
+        console.log(`Host commit: ${hostGit.commitSha.substring(0, 8)} ${hostGit.commitMessage ?? ''}`.trim());
+      }
+    }
+
     if (result.result) {
       console.log('\n━━━ Agent Result ━━━');
       console.log(JSON.stringify(result.result, null, 2));
+      db.updateAgentStatus(agentId, agentStatus, JSON.stringify(result.result));
 
-      db.updateAgentStatus(agentId, result.result.status === 'success' || result.result.status === 'approved' ? 'done' : 'failed', JSON.stringify(result.result));
-      db.appendLog(runId, 'agent_completed', { agentId, status: result.result.status }, `Agent completed: ${agentId} — ${result.result.summary}`);
+      if (agentStatus === 'done') {
+        db.appendLog(runId, 'agent_completed', { agentId, status: result.result.status }, `Agent completed: ${agentId} — ${result.result.summary}`);
+      } else {
+        db.appendLog(runId, 'agent_failed', { agentId, status: result.result.status }, `Agent failed: ${agentId} — ${result.result.summary}`);
+      }
     } else {
       console.log('\n⚠️  No result.json produced by agent.');
       db.updateAgentStatus(agentId, 'failed');
       db.appendLog(runId, 'agent_failed', { agentId }, `Agent failed: ${agentId} — no result`);
     }
 
-    db.updateRunStatus(runId, 'completed');
+    db.updateRunStatus(runId, agentStatus === 'done' ? 'completed' : 'failed');
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`\n❌ Agent spawn failed: ${message}`);
     db.updateAgentStatus(agentId, 'failed');
     db.updateRunStatus(runId, 'failed');
   } finally {
+    if (lease) {
+      worktreeManager?.release(lease.leaseId);
+    }
     db.close();
   }
 }
