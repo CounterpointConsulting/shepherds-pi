@@ -28,7 +28,7 @@ Local CLI tool that automates software development by coordinating specialized A
     ┌─────┴─────┐ ┌───┴────┐ ┌────┴─────┐
     │  Agent 1  │ │ Agent 2│ │ Agent N  │   Docker containers
     │ (persona) │ │(persona│ │ (persona)│   running pi --mode json
-    │  o3       │ │sonnet-4│ │gemini-2.5│   clone repo → work → push
+    │  o3       │ │sonnet-4│ │gemini-2.5│   mounted worktree/clone → work → host/container git finalize
     └───────────┘ └────────┘ └──────────┘
 ```
 
@@ -48,7 +48,7 @@ Local CLI tool that automates software development by coordinating specialized A
 shepherds-pi/
 ├── docker/
 │   ├── Dockerfile              # Agent container image (Node 20 + pi)
-│   └── entrypoint.sh           # Clone repo, build prompt, run pi
+│   └── entrypoint.sh           # Prepare repo (clone or mounted), run pi, optional in-container git finalize
 ├── personas/
 │   ├── architect/              # o3 — designs solutions, creates plans
 │   ├── dba/                    # claude-sonnet-4 — schemas, migrations
@@ -76,6 +76,9 @@ shepherds-pi/
 │   │   └── index.ts            # Loads persona dirs, builds agent prompts
 │   ├── agent/
 │   │   └── spawner.ts          # Docker container lifecycle via dockerode
+│   ├── git/
+│   │   ├── worktree-manager.ts # Host worktree lifecycle + branch lease locks
+│   │   └── host-git-manager.ts # Host-side add/commit/push finalization
 │   ├── orchestrator/
 │   │   ├── coordinator.md      # Orchestrator system prompt
 │   │   ├── event-bus.ts        # Typed event bus (TUI ↔ session communication)
@@ -94,6 +97,10 @@ shepherds-pi/
 │       ├── orchestrator.ts     # Event bus, tools, DB operations
 │       ├── manager.ts          # Manager state, conversions
 │       ├── sanitize.ts         # JSON control-char sanitizer
+│       ├── translator.ts       # Event translation tests
+│       ├── notify.ts           # Notification scheduler tests
+│       ├── worktree-manager.ts # Worktree + branch lock tests
+│       ├── host-git-manager.ts # Host commit/push finalization tests
 │       └── spawn-agent.ts      # End-to-end Docker agent test
 ├── shepherds-pi.yaml           # Project configuration
 ├── .env.example                # Template for secrets (gitignored)
@@ -162,6 +169,8 @@ npm run dev
 
 Type a goal in the TUI to start orchestration. The coordinator will plan, spawn agents, and coordinate the work.
 
+> Note: when using host-managed git mode (`git.repo_mode=worktree` + `git.git_ops_mode=host`), no in-container clone/commit/push is performed.
+
 ## TUI Keybindings
 
 | Key | Action |
@@ -172,7 +181,7 @@ Type a goal in the TUI to start orchestration. The coordinator will plan, spawn 
 | `Enter` | Expand selected agent |
 | `Escape` | Go back |
 | `p` | Plan view |
-| `Ctrl+C` | Quit |
+| `Ctrl+C` | Quit (stops active containers; worktree leases are released by runtime cleanup) |
 
 When the coordinator calls `ask_user`, the input bar highlights yellow and your next message resolves the question.
 
@@ -263,14 +272,20 @@ Agents should load only the minimum relevant skills for the task, and always com
 
 ```bash
 # Unit tests (no API keys needed)
-npx tsx src/test/foundation.ts     # DB, config, personas
-npx tsx src/test/orchestrator.ts   # Event bus, tools, DB
-npx tsx src/test/manager.ts        # Manager state management
-npx tsx src/test/sanitize.ts       # JSON control-char sanitizer
+npx tsx src/test/foundation.ts       # DB, config, personas
+npx tsx src/test/orchestrator.ts     # Event bus, tools, DB
+npx tsx src/test/manager.ts          # Manager state management
+npx tsx src/test/sanitize.ts         # JSON control-char sanitizer
+npx tsx src/test/translator.ts       # Event translation
+npx tsx src/test/notify.ts           # Notification scheduler
+npx tsx src/test/worktree-manager.ts # Worktree + lock behavior
+npx tsx src/test/host-git-manager.ts # Host git finalization
 
 # E2E agent test (needs Docker + API keys)
 npx tsx src/test/spawn-agent.ts code-reviewer "Review package.json"
 npx tsx src/test/spawn-agent.ts architect "Analyze this codebase"
+# Optional branch override for worktree mode:
+SHEPHERDS_TEST_BRANCH=shepherds-test/demo npx tsx src/test/spawn-agent.ts architect "Analyze this codebase"
 ```
 
 ## Known Issues / TODO
@@ -280,5 +295,5 @@ npx tsx src/test/spawn-agent.ts architect "Analyze this codebase"
 - [ ] Error recovery — retry failed agents, escalate to user
 - [ ] Agent result display — render full findings/suggestions in expanded view
 - [ ] Multiple goals — test concurrent goals with separate sessions
-- [ ] Branch strategy — agents currently branch off `main`, need `dev` branch workflow
+- [ ] Branch strategy UX — improve branch naming conventions + policy guidance for orchestrator-generated branches
 - [ ] Prompt optimization — coordinator prompt may need tuning for emergent planning
