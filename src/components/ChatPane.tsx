@@ -3,14 +3,14 @@ import { Box, Text } from 'ink';
 import type { ChatMessage, GoalStatus } from '../types.js';
 
 const statusLabel: Record<GoalStatus, string> = {
-  planning: '📋 Planning',
-  executing: '⚡ Executing',
-  reviewing: '🔍 Reviewing',
-  testing: '🧪 Testing',
-  merging: '🔀 Merging',
-  completed: '✅ Completed',
-  failed: '❌ Failed',
-  blocked: '⚠️ Blocked',
+  planning: 'Planning',
+  executing: 'Executing',
+  reviewing: 'Reviewing',
+  testing: 'Testing',
+  merging: 'Merging',
+  completed: 'Completed',
+  failed: 'Failed',
+  blocked: 'Blocked',
 };
 
 /** Max lines for a single message's content (prevents one long message from eating all rows) */
@@ -61,29 +61,43 @@ interface ChatPaneProps {
   goalStatus: GoalStatus | undefined;
   maxRows: number;
   contentWidth: number;
+  scrollOffset: number;
 }
 
-export function ChatPane({ messages, goalStatus, maxRows, contentWidth }: ChatPaneProps) {
+export function ChatPane({ messages, goalStatus, maxRows, contentWidth, scrollOffset }: ChatPaneProps) {
   // Reserve 1 row for the header line
   const availableRows = Math.max(maxRows - 1, 3);
 
   // Walk backwards from latest messages to fill available rows
-  const { visibleMessages, hasMore } = useMemo(() => {
+  const { visibleMessages, hiddenAbove, hiddenBelow } = useMemo(() => {
     const vis: ChatMessage[] = [];
     let usedRows = 0;
-    for (let i = messages.length - 1; i >= 0; i--) {
+
+    const clampedOffset = Math.max(0, Math.min(scrollOffset, Math.max(messages.length - 1, 0)));
+    const endExclusive = Math.max(0, messages.length - clampedOffset);
+
+    let startIndex = endExclusive;
+
+    for (let i = endExclusive - 1; i >= 0; i--) {
       const rows = estimateMessageHeight(messages[i], contentWidth);
-      if (usedRows + rows > availableRows) break;
+      if (usedRows + rows > availableRows && vis.length > 0) break;
       usedRows += rows;
       vis.unshift(messages[i]);
+      startIndex = i;
+      if (usedRows >= availableRows) break;
     }
-    return { visibleMessages: vis, hasMore: vis.length < messages.length };
-  }, [messages, availableRows, contentWidth]);
+
+    return {
+      visibleMessages: vis,
+      hiddenAbove: Math.max(0, startIndex),
+      hiddenBelow: Math.max(0, messages.length - endExclusive),
+    };
+  }, [messages, availableRows, contentWidth, scrollOffset]);
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" height={maxRows} overflow="hidden">
       {/* Header — 1 row */}
-      <Box paddingX={1}>
+      <Box paddingX={1} height={1} overflow="hidden">
         <Text bold color="cyan">Chat</Text>
         {goalStatus && (
           <>
@@ -93,21 +107,27 @@ export function ChatPane({ messages, goalStatus, maxRows, contentWidth }: ChatPa
             </Text>
           </>
         )}
-        {hasMore && (
+        {hiddenAbove > 0 && (
           <>
             <Text dimColor> │ </Text>
-            <Text dimColor>↑ {messages.length - visibleMessages.length} earlier</Text>
+            <Text dimColor>^ {hiddenAbove} earlier</Text>
+          </>
+        )}
+        {hiddenBelow > 0 && (
+          <>
+            <Text dimColor> │ </Text>
+            <Text dimColor>v {hiddenBelow} newer</Text>
           </>
         )}
       </Box>
 
       {/* Messages — strictly limited to availableRows */}
-      <Box flexDirection="column" paddingX={1}>
+      <Box flexDirection="column" paddingX={1} height={availableRows} overflow="hidden">
         {visibleMessages.map(msg => (
           <ChatMessageRow key={msg.id} message={msg} maxLines={MAX_LINES_PER_MESSAGE} />
         ))}
         {messages.length === 0 && (
-          <Text dimColor> No messages yet. Type a goal to get started.</Text>
+          <Text dimColor> No messages yet. Type your first message to start a goal.</Text>
         )}
       </Box>
     </Box>
@@ -140,7 +160,7 @@ function ChatMessageRow({ message, maxLines }: { message: ChatMessage; maxLines:
         <Box flexDirection="column">
           <Box>
             <Text dimColor>{time} </Text>
-            <Text bold color="cyan">🐑:</Text>
+            <Text bold color="cyan">PI:</Text>
           </Box>
           <Text wrap="wrap">{truncated}</Text>
         </Box>
@@ -163,7 +183,7 @@ function ChatMessageRow({ message, maxLines }: { message: ChatMessage; maxLines:
         <Box flexDirection="column">
           <Box>
             <Text dimColor>{time} </Text>
-            <Text bold color="yellow">❓ Coordinator asks:</Text>
+            <Text bold color="yellow">? Coordinator asks:</Text>
           </Box>
           <Text color="yellow" wrap="wrap">{truncated}</Text>
         </Box>
@@ -176,15 +196,15 @@ function ChatMessageRow({ message, maxLines }: { message: ChatMessage; maxLines:
 
 function getToolIcon(toolName?: string): string {
   switch (toolName) {
-    case 'spawn_agent': return '🔧';
-    case 'spawn_agents': return '🔧';
-    case 'create_branch': return '🌿';
-    case 'update_plan': return '📋';
-    case 'read_run_log': return '📖';
-    case 'ask_user': return '❓';
-    case 'compaction': return '🔄';
-    case 'container': return '📦';
-    default: return '⚡';
+    case 'spawn_agent': return '*';
+    case 'spawn_agents': return '*';
+    case 'create_branch': return '#';
+    case 'update_plan': return '=';
+    case 'read_run_log': return 'r';
+    case 'ask_user': return '?';
+    case 'compaction': return '~';
+    case 'container': return 'c';
+    default: return '.';
   }
 }
 

@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { Box, Text, useInput, useApp, useStdout } from 'ink';
 import type { Goal, ViewMode, FocusZone } from './types.js';
 import { OrchestratorManager } from './orchestrator/manager.js';
@@ -31,6 +31,7 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
   const [viewMode, setViewMode] = useState<ViewMode>('default');
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [agentCursor, setAgentCursor] = useState(0);
+  const [chatScrollOffset, setChatScrollOffset] = useState(0);
 
   useEffect(() => {
     const unsub = manager.onChange(forceUpdate);
@@ -45,9 +46,17 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
   const activeGoalId = manager.activeGoalId;
   const activeGoal = manager.getActiveGoal();
   const messagesForGoal = activeGoalId ? manager.getMessages(activeGoalId) : [];
+  const maxChatScrollOffset = useMemo(
+    () => Math.max(0, messagesForGoal.length - 1),
+    [messagesForGoal.length],
+  );
   const agentsForGoal = activeGoalId ? manager.getAgents(activeGoalId) : [];
   const planForGoal = activeGoalId ? manager.getPlan(activeGoalId) : null;
   const askUserActive = activeGoalId ? manager.getAskUserQuestion(activeGoalId) !== null : false;
+
+  useEffect(() => {
+    setChatScrollOffset(prev => Math.min(prev, maxChatScrollOffset));
+  }, [maxChatScrollOffset]);
 
   const selectedAgent = selectedAgentId
     ? agentsForGoal.find(a => a.id === selectedAgentId) ?? null
@@ -82,14 +91,8 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
     if (input === 'c' && key.ctrl) { exit(); return; }
     if (input === 'd' && key.ctrl) { exit(); return; }
 
-    if (/^[1-9]$/.test(input)) {
-      const idx = parseInt(input) - 1;
-      if (idx < goals.length) handleGoalSelect(goals[idx].id);
-      return;
-    }
-
     if (viewMode === 'agentExpanded') {
-      if (key.escape) { setViewMode('default'); return; }
+      if (key.escape) { setViewMode('default'); }
       return;
     }
 
@@ -98,8 +101,37 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
       return;
     }
 
-    if (input === '\t') {
+    // Ink exposes tab as key.tab (input is empty for non-alphanumeric keys)
+    if (key.tab) {
       setFocusZone(prev => prev === 'chat' ? 'agents' : 'chat');
+      return;
+    }
+
+    // Chat-focused navigation: scroll chat history
+    if (focusZone === 'chat') {
+      if (key.pageUp) {
+        setChatScrollOffset(prev => Math.min(maxChatScrollOffset, prev + 10));
+        return;
+      }
+      if (key.pageDown) {
+        setChatScrollOffset(prev => Math.max(0, prev - 10));
+        return;
+      }
+      if (key.upArrow) {
+        setChatScrollOffset(prev => Math.min(maxChatScrollOffset, prev + 1));
+        return;
+      }
+      if (key.downArrow) {
+        setChatScrollOffset(prev => Math.max(0, prev - 1));
+        return;
+      }
+      // Reserve printable keys for InputBar so typing doesn't trigger global hotkeys.
+      return;
+    }
+
+    if (/^[1-9]$/.test(input)) {
+      const idx = parseInt(input) - 1;
+      if (idx < goals.length) handleGoalSelect(goals[idx].id);
       return;
     }
 
@@ -114,11 +146,9 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
       return;
     }
 
-    if (focusZone === 'agents') {
-      if (key.upArrow) { navigateAgent('up'); return; }
-      if (key.downArrow) { navigateAgent('down'); return; }
-      if (key.return && selectedAgent) { setViewMode('agentExpanded'); return; }
-    }
+    if (key.upArrow) { navigateAgent('up'); return; }
+    if (key.downArrow) { navigateAgent('down'); return; }
+    if (key.return && selectedAgent) { setViewMode('agentExpanded'); return; }
   });
 
   // ─── Handlers ────────────────────────────────────────────────
@@ -137,6 +167,7 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
     setSelectedAgentId(null);
     setViewMode('default');
     setFocusZone('chat');
+    setChatScrollOffset(0);
   }, [manager]);
 
   // ─── Layout calculation ──────────────────────────────────────
@@ -155,30 +186,6 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
   const chatContentWidth = Math.max(chatInnerWidth - 4, 20);
   // Chat pane rows: mainHeight minus 2 border rows
   const chatMaxRows = Math.max(mainHeight - 2, 4);
-
-  // ─── Welcome screen ──────────────────────────────────────────
-  if (goals.length === 0) {
-    return (
-      <Box flexDirection="column" height={termHeight} justifyContent="center" alignItems="center">
-        <Text bold color="cyan">🐑 Shepherds Pi</Text>
-        <Box marginTop={1}>
-          <Text dimColor>Type a goal to get started</Text>
-        </Box>
-        <Box marginTop={1}>
-          <Text dimColor>Example: "Add user authentication with JWT tokens"</Text>
-        </Box>
-        <Box marginTop={1}>
-          <InputBar
-            value=""
-            onChange={() => {}}
-            onSubmit={handleSubmit}
-            askUserActive={false}
-            focusZone="chat"
-          />
-        </Box>
-      </Box>
-    );
-  }
 
   // ─── Main render ─────────────────────────────────────────────
   return (
@@ -214,6 +221,7 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
                 goalStatus={activeGoal?.status}
                 maxRows={chatMaxRows}
                 contentWidth={chatContentWidth}
+                scrollOffset={chatScrollOffset}
               />
             </Box>
 
@@ -257,34 +265,51 @@ export function App({ config }: { config: ShepherdsPiConfig }) {
       />
 
       {/* 1 row — status bar */}
-      <StatusBar focusZone={focusZone} viewMode={viewMode} activeGoal={activeGoal} />
+      <StatusBar
+        focusZone={focusZone}
+        viewMode={viewMode}
+        activeGoal={activeGoal}
+        chatScrollOffset={chatScrollOffset}
+      />
     </Box>
   );
 }
 
 // ─── Status Bar ──────────────────────────────────────────────────
 
-function StatusBar({ focusZone, viewMode, activeGoal }: {
+function StatusBar({ focusZone, viewMode, activeGoal, chatScrollOffset }: {
   focusZone: FocusZone;
   viewMode: ViewMode;
   activeGoal: Goal | null;
+  chatScrollOffset: number;
 }) {
-  const focusIndicator = focusZone === 'chat' ? '💬 Chat' : '🔍 Agents';
+  const focusIndicator = focusZone === 'chat' ? 'Chat' : 'Agents';
+  const typingMode = focusZone === 'chat'
+    ? 'Typing mode: Chat (hotkeys off)'
+    : 'Typing mode: Hotkeys';
+
   return (
     <Box>
       <Text bold color={focusZone === 'chat' ? 'cyan' : 'yellow'}>
         {' '}{focusIndicator}
       </Text>
+      <Text color={focusZone === 'chat' ? 'cyan' : 'yellow'}>
+        {'  '}{typingMode}
+      </Text>
       <Text dimColor>
-        {'  '}Tab:switch
-        {'  '}↑↓:nav
+        {'  '}Tab:focus
+        {'  '}(Chat) ↑↓/PgUp/PgDn:scroll
+        {'  '}(Agents) ↑↓:nav
         {'  '}Enter:open
         {'  '}a:agent detail
         {'  '}p:plan
-        {'  '}Esc:back
         {'  '}1-9:goal
+        {'  '}Esc:back
         {'  '}Ctrl+C:quit
       </Text>
+      {focusZone === 'chat' && chatScrollOffset > 0 && (
+        <Text color="yellow">  (Viewing history)</Text>
+      )}
     </Box>
   );
 }

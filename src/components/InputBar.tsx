@@ -36,7 +36,7 @@ export function InputBar({ value, onChange, onSubmit, askUserActive, focusZone }
 
   const borderColor = askUserActive ? 'yellow' : 'gray';
   const borderStyle = askUserActive ? 'bold' : 'single';
-  const prompt = askUserActive ? '❓ Coordinator is waiting...' : '🐑';
+  const prompt = askUserActive ? '? Coordinator is waiting...' : 'PI';
 
   return (
     <Box borderStyle={borderStyle} borderColor={borderColor} paddingX={1}>
@@ -45,7 +45,7 @@ export function InputBar({ value, onChange, onSubmit, askUserActive, focusZone }
       </Text>
       <Text>
         {internalValue}
-        <Text dimColor>▍</Text>
+        <Text dimColor>|</Text>
       </Text>
       {internalValue.length === 0 && (
         <Text dimColor>Type a message... (Enter to send)</Text>

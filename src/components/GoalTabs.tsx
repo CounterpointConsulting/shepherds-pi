@@ -3,14 +3,14 @@ import { Box, Text } from 'ink';
 import type { Goal, GoalStatus } from '../types.js';
 
 const statusIcon: Record<GoalStatus, string> = {
-  planning: '📋',
-  executing: '⚡',
-  reviewing: '🔍',
-  testing: '🧪',
-  merging: '🔀',
-  completed: '✅',
-  failed: '❌',
-  blocked: '⚠️',
+  planning: 'P',
+  executing: 'E',
+  reviewing: 'R',
+  testing: 'T',
+  merging: 'M',
+  completed: 'C',
+  failed: 'X',
+  blocked: '!',
 };
 
 const statusColor: Record<GoalStatus, string> = {
@@ -31,7 +31,7 @@ export function GoalTabs({ goals, activeGoalId, onSelect }: {
 }) {
   return (
     <Box borderStyle="single" borderColor="gray">
-      <Text bold color="cyan"> 🐑 </Text>
+      <Text bold color="cyan"> PI </Text>
       {goals.map((goal, i) => {
         const isActive = goal.id === activeGoalId;
         const icon = statusIcon[goal.status];

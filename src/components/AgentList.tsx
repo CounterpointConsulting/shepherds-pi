@@ -3,11 +3,11 @@ import { Box, Text } from 'ink';
 import type { AgentRun, AgentStatus } from '../types.js';
 
 const statusIcon: Record<AgentStatus, string> = {
-  spawning: '⏳',
-  running: '◐',
-  done: '✓',
-  failed: '✗',
-  blocked: '⚠',
+  spawning: '.',
+  running: '*',
+  done: '+',
+  failed: 'x',
+  blocked: '!',
 };
 
 const statusColor: Record<AgentStatus, string> = {
