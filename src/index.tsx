@@ -1,33 +1,40 @@
 #!/usr/bin/env node
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import React from 'react';
 import { render } from 'ink';
 import { App } from './App.js';
 import { loadConfig } from './config/index.js';
-import path from 'node:path';
+import { resolveConfigPath } from './config/resolve-config.js';
 
-// Find config — walk up from CWD or use project root
-const configPath = findConfigPath();
-const config = loadConfig(configPath);
+export interface RunOptions {
+  configPath?: string;
+}
 
-render(React.createElement(App, { config }));
+/**
+ * Run the interactive TUI.
+ */
+export function runTui(options: RunOptions = {}): void {
+  if (!process.stdin.isTTY) {
+    throw new Error('Shepherds Pi requires an interactive terminal (TTY).');
+  }
 
-function findConfigPath(): string {
-  // Try CWD first
-  const cwd = process.cwd();
-  const cwdConfig = path.join(cwd, 'shepherds-pi.yaml');
-  try {
-    require('fs').accessSync(cwdConfig);
-    return cwdConfig;
-  } catch { /* not found */ }
+  const configPath = resolveConfigPath(options);
+  const config = loadConfig(configPath);
+  render(React.createElement(App, { config }));
+}
 
-  // Fall back to the directory where this script lives (dev mode)
-  const scriptDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-  const scriptConfig = path.join(scriptDir, 'shepherds-pi.yaml');
-  try {
-    require('fs').accessSync(scriptConfig);
-    return scriptConfig;
-  } catch { /* not found */ }
+function isDirectExecution(metaUrl: string): boolean {
+  if (!process.argv[1]) return false;
+  const currentFile = path.resolve(fileURLToPath(metaUrl));
+  const entryFile = path.resolve(process.argv[1]);
+  return currentFile === entryFile;
+}
 
-  // Last resort: just use CWD
-  return cwdConfig;
+function main(): void {
+  runTui();
+}
+
+if (isDirectExecution(import.meta.url)) {
+  main();
 }

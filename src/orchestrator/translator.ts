@@ -334,6 +334,14 @@ export function translateBusEvent(
         }];
       }
 
+      if (inner?.type === 'worktree_acquiring') {
+        const branch = typeof inner.branch === 'string' ? inner.branch : 'unknown';
+        return [{
+          kind: 'add-message',
+          message: makeToolMessage(ctx, `🪵 Acquiring worktree for ${branch}...`, { toolName: 'spawn_agent', agentId: event.agentId }),
+        }];
+      }
+
       if (inner?.type === 'worktree_acquired') {
         const branch = typeof inner.branch === 'string' ? inner.branch : 'unknown';
         return [{

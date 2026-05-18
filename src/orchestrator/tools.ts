@@ -26,6 +26,7 @@ export function createOrchestratorTools(deps: {
       repoPath: config.project.repoPath,
       worktreesDir: config.git.worktreesDir,
       resetBeforeRun: config.git.resetWorktreeBeforeRun,
+      acquireStepTimeoutMs: 90_000,
     })
     : null;
 
@@ -224,6 +225,20 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
   eventBus.emit({ type: 'agent_spawned', agentId, persona: persona.name, branch: branchName });
 
   try {
+    if (config.git.repoMode === 'worktree') {
+      db.appendLog(
+        runId,
+        'agent_worktree_acquiring',
+        { agentId, branch: branchName },
+        `Acquiring worktree for ${agentId} on ${branchName}`,
+      );
+      eventBus.emit({
+        type: 'agent_event',
+        agentId,
+        event: { type: 'worktree_acquiring', branch: branchName },
+      });
+    }
+
     lease = await acquireWorktreeLease(worktreeManager, config, branchName, agentId);
     if (lease) {
       db.appendLog(

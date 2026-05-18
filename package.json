@@ -3,10 +3,37 @@
   "version": "0.1.0",
   "description": "Multi-agent software development automation",
   "type": "module",
+  "bin": {
+    "shepherds-pi": "./dist/cli.js"
+  },
+  "files": [
+    "dist/**",
+    "docker/**",
+    "personas/**",
+    "templates/**",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CounterpointConsulting/shepherds-pi.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CounterpointConsulting/shepherds-pi/issues"
+  },
+  "homepage": "https://github.com/CounterpointConsulting/shepherds-pi#readme",
   "scripts": {
-    "dev": "tsx src/index.tsx",
-    "build": "tsc",
-    "start": "node dist/index.js",
+    "dev": "tsx src/cli.ts",
+    "clean": "node scripts/clean.mjs",
+    "build:ts": "tsc -p tsconfig.build.json",
+    "build:assets": "node scripts/copy-assets.mjs",
+    "build": "npm run clean && npm run build:ts && npm run build:assets",
+    "prepack": "npm run build",
+    "pack:dry-run": "npm pack --dry-run",
+    "start": "node dist/cli.js",
     "docker:build": "tsx src/scripts/docker-build.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx src/test/foundation.ts && tsx src/test/orchestrator.ts && tsx src/test/manager.ts && tsx src/test/sanitize.ts && tsx src/test/translator.ts && tsx src/test/notify.ts && tsx src/test/worktree-manager.ts && tsx src/test/host-git-manager.ts",

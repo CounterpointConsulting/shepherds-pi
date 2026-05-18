@@ -17,6 +17,7 @@ interface WorktreeManagerOptions {
   repoPath: string;
   worktreesDir: string;
   resetBeforeRun: boolean;
+  acquireStepTimeoutMs?: number;
 }
 
 interface AcquireInput {
@@ -35,6 +36,7 @@ interface BranchLockPayload {
 }
 
 const STALE_LOCK_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12h
+const DEFAULT_ACQUIRE_STEP_TIMEOUT_MS = 90 * 1000; // 90s per long-running git step
 
 /**
  * Host-side manager for branch worktrees and branch leasing.
@@ -48,6 +50,7 @@ export class WorktreeManager {
   private readonly worktreesDir: string;
   private readonly resetBeforeRun: boolean;
   private readonly locksDir: string;
+  private readonly acquireStepTimeoutMs: number;
 
   private readonly activeBranchLeases = new Map<string, string>();
   private readonly leases = new Map<string, WorktreeLease>();
@@ -58,6 +61,7 @@ export class WorktreeManager {
     this.worktreesDir = options.worktreesDir;
     this.resetBeforeRun = options.resetBeforeRun;
     this.locksDir = path.join(this.worktreesDir, '.locks');
+    this.acquireStepTimeoutMs = options.acquireStepTimeoutMs ?? DEFAULT_ACQUIRE_STEP_TIMEOUT_MS;
   }
 
   async acquire(input: AcquireInput): Promise<WorktreeLease> {
@@ -87,13 +91,25 @@ export class WorktreeManager {
       this.activeBranchLeases.set(branch, leaseId);
 
       const repoGit = simpleGit(this.repoPath);
-      await repoGit.fetch('origin');
+      await this.withTimeout(
+        () => repoGit.fetch('origin'),
+        this.acquireStepTimeoutMs,
+        `git fetch origin for branch "${branch}"`,
+      );
 
       const worktreePath = this.getWorktreePathForBranch(branch);
-      await this.ensureBranchWorktree(repoGit, branch, baseBranch, worktreePath);
+      await this.withTimeout(
+        () => this.ensureBranchWorktree(repoGit, branch, baseBranch, worktreePath),
+        this.acquireStepTimeoutMs,
+        `ensure worktree for branch "${branch}"`,
+      );
 
       if (this.resetBeforeRun) {
-        await this.resetWorktree(worktreePath, branch, baseBranch);
+        await this.withTimeout(
+          () => this.resetWorktree(worktreePath, branch, baseBranch),
+          this.acquireStepTimeoutMs,
+          `reset worktree for branch "${branch}"`,
+        );
       }
 
       const lease: WorktreeLease = {
@@ -335,6 +351,23 @@ export class WorktreeManager {
     }
 
     return null;
+  }
+
+  private async withTimeout<T>(op: () => Promise<T>, timeoutMs: number, label: string): Promise<T> {
+    let timer: NodeJS.Timeout | null = null;
+
+    try {
+      return await Promise.race([
+        op(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(`Timed out after ${timeoutMs}ms while trying to ${label}`));
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 }
 
