@@ -131,41 +131,49 @@ The coordinator has 10 tools (no coding tools):
 - Node.js 20+
 - Docker Desktop (running)
 - OpenRouter API key
-- GitHub PAT with `repo` scope
+- GitHub PAT with `repo` scope (required for clone/container git modes)
 
-### Install
-
-```bash
-git clone https://github.com/CounterpointConsulting/shepherds-pi.git
-cd shepherds-pi
-npm install
-```
-
-### Configure
-
-1. Copy `.env.example` to `.env` and fill in secrets:
-   ```
-   GIT_TOKEN=ghp_yourGitHubPat
-   OPENROUTER_API_KEY=sk-or-v1_yourKey
-   ```
-
-2. Edit `shepherds-pi.yaml` for your project (repo path, branches, models).
-
-3. Login to pi for OpenRouter (stores key in pi auth, alternative to .env):
-   ```bash
-   pi --login openrouter
-   ```
-
-4. Build the Docker agent image:
-   ```bash
-   npm run docker:build
-   ```
-
-### Run
+### Install (global CLI)
 
 ```bash
-npm run dev
+npm i -g shepherds-pi
 ```
+
+### Quick Start (inside your own project repo)
+
+```bash
+cd /path/to/your/project-repo
+shepherds-pi init
+cp .env.example .env
+# Fill .env with your values
+shepherds-pi doctor
+shepherds-pi setup
+shepherds-pi
+```
+
+### Install (project-local, team-friendly)
+
+```bash
+npm i -D shepherds-pi
+npx shepherds-pi init
+npx shepherds-pi doctor
+npx shepherds-pi setup
+npx shepherds-pi
+```
+
+### Commands
+
+```bash
+shepherds-pi init [--force] [--no-personas]
+shepherds-pi doctor [--config <path>]
+shepherds-pi setup [--config <path>]
+shepherds-pi [--config <path>]
+```
+
+Configuration resolution order:
+1. `--config <path>`
+2. `SHEPHERDS_PI_CONFIG` env var
+3. nearest `shepherds-pi.yaml` by walking upward from current directory
 
 Type a goal in the TUI to start orchestration. The coordinator will plan, spawn agents, and coordinate the work.
 
@@ -206,14 +214,14 @@ project:
   dev_branch: dev
   main_branch: main
 docker:
-  image: shepherds-pi-agent:latest
+  image: ghcr.io/counterpointconsulting/shepherds-pi-agent:latest
   working_dir: /workspace/repo
 openrouter:
   api_key: ${OPENROUTER_API_KEY}
 coordinator:
   model: openrouter/anthropic/claude-sonnet-4
   thinking_level: high
-personas_dir: ./personas
+personas_dir: ./.shepherds-pi/personas
 agent:
   timeout_minutes: 30
   max_retries: 1
@@ -267,6 +275,12 @@ Workflow skills should follow a consistent template. Use:
 ```
 
 Agents should load only the minimum relevant skills for the task, and always complete with `summarize`.
+
+## Release / Publisher Setup
+
+If you are maintaining and publishing Shepherds Pi (npm package + GHCR image), use:
+
+- `docs/release-publisher-setup.md`
 
 ## Testing
 
