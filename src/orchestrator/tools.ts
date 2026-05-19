@@ -1,6 +1,5 @@
 import { Type } from 'typebox';
 import { defineTool, type ToolDefinition } from '@mariozechner/pi-coding-agent';
-import type { OrchestratorEventBus } from './event-bus.js';
 import type { ShepherdsDB } from '../db/index.js';
 import type { ShepherdsPiConfig } from '../config/index.js';
 import { getGitToken } from '../config/index.js';
@@ -13,8 +12,13 @@ import crypto from 'node:crypto';
 
 // ─── Tool factory ────────────────────────────────────────────────
 
+interface OrchestratorEventBusLike {
+  emit(event: { type: string; [key: string]: unknown }): void;
+  askUser(question: string): Promise<string>;
+}
+
 export function createOrchestratorTools(deps: {
-  eventBus: OrchestratorEventBus;
+  eventBus?: OrchestratorEventBusLike;
   db: ShepherdsDB;
   config: ShepherdsPiConfig;
   getRunId: () => string;
@@ -147,7 +151,7 @@ type HostGitFinalizeOutcome = Awaited<ReturnType<typeof finalizeAgentChanges>>;
 type SpawnLogMode = 'single' | 'parallel';
 
 interface ExecuteAgentSpec {
-  eventBus: OrchestratorEventBus;
+  eventBus?: OrchestratorEventBusLike;
   db: ShepherdsDB;
   config: ShepherdsPiConfig;
   worktreeManager: WorktreeManager | null;
@@ -222,7 +226,7 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
     : `Agent spawned: ${agentId} (${persona.name}) on ${branchName}`;
 
   db.appendLog(runId, 'agent_spawned', { agentId, persona: persona.name, branch: branchName }, spawnSummary);
-  eventBus.emit({ type: 'agent_spawned', agentId, persona: persona.name, branch: branchName });
+  eventBus?.emit({ type: 'agent_spawned', agentId, persona: persona.name, branch: branchName });
 
   try {
     if (config.git.repoMode === 'worktree') {
@@ -232,7 +236,7 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
         { agentId, branch: branchName },
         `Acquiring worktree for ${agentId} on ${branchName}`,
       );
-      eventBus.emit({
+      eventBus?.emit({
         type: 'agent_event',
         agentId,
         event: { type: 'worktree_acquiring', branch: branchName },
@@ -247,7 +251,7 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
         { agentId, leaseId: lease.leaseId, branch: lease.branch, worktreePath: lease.worktreePath },
         `Worktree acquired for ${agentId} on ${lease.branch}`,
       );
-      eventBus.emit({
+      eventBus?.emit({
         type: 'agent_event',
         agentId,
         event: { type: 'worktree_acquired', branch: lease.branch, worktreePath: lease.worktreePath },
@@ -278,7 +282,7 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
       onEvent: (event) => {
         if (event.type === 'container_started' && typeof event.containerName === 'string') {
           db.updateAgentContainer(agentId, event.containerName);
-          eventBus.emit({
+          eventBus?.emit({
             type: 'agent_event',
             agentId,
             event: {
@@ -290,7 +294,7 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
           return;
         }
 
-        eventBus.emit({ type: 'agent_event', agentId, event });
+        eventBus?.emit({ type: 'agent_event', agentId, event });
       },
     });
 
@@ -326,7 +330,7 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
               : `Host git found no file changes for ${agentId}`,
           );
 
-          eventBus.emit({
+          eventBus?.emit({
             type: 'agent_event',
             agentId,
             event: { type: 'host_git_finalized', ...hostGit },
@@ -335,7 +339,7 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
           status = 'failed';
           const message = err instanceof Error ? err.message : String(err);
           failReason = `Host git finalize failed: ${message}`;
-          eventBus.emit({
+          eventBus?.emit({
             type: 'agent_event',
             agentId,
             event: { type: 'host_git_failed', error: message },
@@ -352,10 +356,10 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
         : `Agent completed: ${agentId} — ${spawnResult.result?.summary ?? 'no summary'}`;
 
       db.appendLog(runId, 'agent_completed', { agentId }, completedSummary);
-      eventBus.emit({ type: 'agent_completed', agentId, result: spawnResult.result });
+      eventBus?.emit({ type: 'agent_completed', agentId, result: spawnResult.result });
     } else {
       db.appendLog(runId, 'agent_failed', { agentId, exitCode: spawnResult.exitCode, timedOut: spawnResult.timedOut }, `Agent failed: ${agentId} — ${failReason}`);
-      eventBus.emit({ type: 'agent_failed', agentId, error: failReason });
+      eventBus?.emit({ type: 'agent_failed', agentId, error: failReason });
     }
 
     return {
@@ -369,7 +373,7 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
     const message = err instanceof Error ? err.message : String(err);
     db.updateAgentStatus(agentId, 'failed');
     db.appendLog(runId, 'agent_failed', { agentId, error: message }, `Agent failed: ${agentId} — ${message}`);
-    eventBus.emit({ type: 'agent_failed', agentId, error: message });
+    eventBus?.emit({ type: 'agent_failed', agentId, error: message });
 
     return {
       ok: false,
@@ -390,7 +394,7 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
 }
 
 function createSpawnAgentTool(
-  eventBus: OrchestratorEventBus,
+  eventBus: OrchestratorEventBusLike | undefined,
   db: ShepherdsDB,
   config: ShepherdsPiConfig,
   getRunId: () => string,
@@ -450,7 +454,7 @@ function createSpawnAgentTool(
 // ─── spawn_agents (parallel) ─────────────────────────────────────
 
 function createSpawnAgentsTool(
-  eventBus: OrchestratorEventBus,
+  eventBus: OrchestratorEventBusLike | undefined,
   db: ShepherdsDB,
   config: ShepherdsPiConfig,
   getRunId: () => string,
@@ -518,7 +522,7 @@ function createSpawnAgentsTool(
 
 // ─── create_branch ───────────────────────────────────────────────
 
-function createBranchTool(eventBus: OrchestratorEventBus, config: ShepherdsPiConfig): ToolDefinition<typeof CreateBranchParams> {
+function createBranchTool(eventBus: OrchestratorEventBusLike | undefined, config: ShepherdsPiConfig): ToolDefinition<typeof CreateBranchParams> {
   return defineTool({
     name: 'create_branch',
     label: 'Create Git Branch',
@@ -546,7 +550,7 @@ function createBranchTool(eventBus: OrchestratorEventBus, config: ShepherdsPiCon
         }
 
         await git.push('origin', `${name}:${name}`, ['--set-upstream']);
-        eventBus.emit({ type: 'branch_created', name, base: baseBranch });
+        eventBus?.emit({ type: 'branch_created', name, base: baseBranch });
 
         return {
           content: [{ type: 'text' as const, text: `Branch "${name}" created from "${baseBranch}" and pushed to origin.` }],
@@ -661,7 +665,7 @@ function readPlanTool(db: ShepherdsDB, getRunId: () => string): ToolDefinition {
 
 // ─── update_plan ─────────────────────────────────────────────────
 
-function updatePlanTool(eventBus: OrchestratorEventBus, db: ShepherdsDB, getRunId: () => string): ToolDefinition<typeof UpdatePlanParams> {
+function updatePlanTool(eventBus: OrchestratorEventBusLike | undefined, db: ShepherdsDB, getRunId: () => string): ToolDefinition<typeof UpdatePlanParams> {
   return defineTool({
     name: 'update_plan',
     label: 'Update Plan',
@@ -687,7 +691,7 @@ function updatePlanTool(eventBus: OrchestratorEventBus, db: ShepherdsDB, getRunI
       db.appendLog(runId, version === 1 ? 'plan_created' : 'plan_updated', { version }, `Plan ${version === 1 ? 'created' : 'updated'} (v${version})`);
 
       const steps = (parsed as { steps?: unknown[] })?.steps ?? [];
-      eventBus.emit({ type: 'plan_updated', steps });
+      eventBus?.emit({ type: 'plan_updated', steps });
 
       return {
         content: [{ type: 'text' as const, text: `Plan saved (v${version}) with ${steps.length} steps.` }],
@@ -734,18 +738,33 @@ function readRunLogTool(db: ShepherdsDB, getRunId: () => string): ToolDefinition
 
 // ─── ask_user ────────────────────────────────────────────────────
 
-function askUserTool(eventBus: OrchestratorEventBus): ToolDefinition<typeof AskUserParams> {
+function askUserTool(eventBus: OrchestratorEventBusLike | undefined): ToolDefinition<typeof AskUserParams> {
   return defineTool({
     name: 'ask_user',
     label: 'Ask User',
     description: 'Ask the user a question and wait for their response.',
     parameters: AskUserParams,
     promptSnippet: 'Ask the user for clarification or guidance',
-    async execute(_toolCallId, params) {
-      const response = await eventBus.askUser(params.question);
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (eventBus) {
+        const response = await eventBus.askUser(params.question);
+        return {
+          content: [{ type: 'text' as const, text: response }],
+          details: {} as Record<string, unknown>,
+        };
+      }
+
+      if (!ctx.hasUI) {
+        return {
+          content: [{ type: 'text' as const, text: 'Unable to ask user: interactive UI is not available.' }],
+          details: { cancelled: true } as Record<string, unknown>,
+        };
+      }
+
+      const response = await ctx.ui.input('Question from coordinator', params.question);
       return {
-        content: [{ type: 'text' as const, text: response }],
-        details: {} as Record<string, unknown>,
+        content: [{ type: 'text' as const, text: response ?? '' }],
+        details: { cancelled: response == null } as Record<string, unknown>,
       };
     },
   });
@@ -753,7 +772,7 @@ function askUserTool(eventBus: OrchestratorEventBus): ToolDefinition<typeof AskU
 
 // ─── update_goal_status ──────────────────────────────────────────
 
-function updateGoalStatusTool(eventBus: OrchestratorEventBus, db: ShepherdsDB, getRunId: () => string): ToolDefinition<typeof UpdateGoalStatusParams> {
+function updateGoalStatusTool(eventBus: OrchestratorEventBusLike | undefined, db: ShepherdsDB, getRunId: () => string): ToolDefinition<typeof UpdateGoalStatusParams> {
   return defineTool({
     name: 'update_goal_status',
     label: 'Update Goal Status',
@@ -763,7 +782,7 @@ function updateGoalStatusTool(eventBus: OrchestratorEventBus, db: ShepherdsDB, g
       const runId = getRunId();
       db.updateRunStatus(runId, params.status);
       db.appendLog(runId, 'status_changed', { status: params.status, message: params.message }, `Status: ${params.status}`);
-      eventBus.emit({ type: 'goal_status_changed', status: params.status, message: params.message });
+      eventBus?.emit({ type: 'goal_status_changed', status: params.status, message: params.message });
 
       return {
         content: [{ type: 'text' as const, text: `Goal status updated to: ${params.status}` }],

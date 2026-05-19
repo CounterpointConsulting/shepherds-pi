@@ -4,9 +4,32 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { ShepherdsDB } from '../db/index.js';
-import { OrchestratorEventBus, type OrchestratorEvent } from '../orchestrator/event-bus.js';
 import { createOrchestratorTools } from '../orchestrator/tools.js';
 import type { ShepherdsPiConfig } from '../config/index.js';
+
+interface OrchestratorEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
+class TestEventBus {
+  private listeners = new Set<(event: OrchestratorEvent) => void>();
+
+  emit(event: OrchestratorEvent): void {
+    for (const listener of this.listeners) listener(event);
+  }
+
+  onEvent(listener: (event: OrchestratorEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  askUser(question: string): Promise<string> {
+    return new Promise<string>((resolve) => {
+      this.emit({ type: 'user_question', question, resolve });
+    });
+  }
+}
 
 function run(cmd: string, cwd: string): string {
   return execSync(cmd, { cwd, stdio: 'pipe', encoding: 'utf-8' }).trim();
@@ -229,7 +252,7 @@ async function main(): Promise<void> {
     const runId = `run-e2e-${Date.now().toString(36)}`;
     db.createRun(runId, 'E2E worktree handoff test');
 
-    const eventBus = new OrchestratorEventBus();
+    const eventBus = new TestEventBus();
     const events: OrchestratorEvent[] = [];
     const unsubscribe = eventBus.onEvent((event) => {
       events.push(event);
@@ -337,7 +360,7 @@ async function main(): Promise<void> {
       'Expected retry run on same branch to succeed (lease should have been released)');
 
     // ─── Events + lock cleanup assertions ───────────────────────────────
-    const hostGitEvents = events.filter((e): e is Extract<OrchestratorEvent, { type: 'agent_event' }> => {
+    const hostGitEvents = events.filter((e) => {
       return e.type === 'agent_event' && isRecord(e.event) && e.event.type === 'host_git_finalized';
     });
 

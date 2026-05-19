@@ -59,8 +59,8 @@ export interface AgentResultJson {
  *     the log stream or container.wait throws.
  *
  * This function is silent — all status flows through onEvent/onStdout
- * callbacks so the caller (orchestrator) controls how output reaches the
- * user (e.g. via Ink TUI, not console.log).
+ * callbacks so the caller (coordinator runtime) controls how output reaches
+ * the user via pi UI mechanisms.
  */
 export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const docker = new Docker();
@@ -186,7 +186,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   // ─── 5. Timeout + abort enforcement ──────────────────────────
   // Kill the container after timeoutMinutes. Also honor an external
-  // AbortSignal so the caller (TUI) can cancel manually.
+  // AbortSignal so the caller can cancel manually.
   // The try/finally below guarantees these handlers are cleaned up
   // even if the log stream or container.wait throws.
   let timedOut = false;

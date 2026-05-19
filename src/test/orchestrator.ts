@@ -10,7 +10,6 @@
  * Does NOT actually start a pi session (needs API key).
  */
 
-import { OrchestratorEventBus } from '../orchestrator/event-bus.js';
 import { createOrchestratorTools } from '../orchestrator/tools.js';
 import { ShepherdsDB } from '../db/index.js';
 import { loadConfig } from '../config/index.js';
@@ -18,11 +17,35 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 
+interface TestEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
+class TestEventBus {
+  private listeners = new Set<(event: TestEvent) => void>();
+
+  emit(event: TestEvent): void {
+    for (const listener of this.listeners) listener(event);
+  }
+
+  onEvent(listener: (event: TestEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  askUser(question: string): Promise<string> {
+    return new Promise<string>((resolve) => {
+      this.emit({ type: 'user_question', question, resolve });
+    });
+  }
+}
+
 // ─── Test 1: Event Bus ───────────────────────────────────────────
 
 console.log('Test 1: Event Bus...');
 
-const bus = new OrchestratorEventBus();
+const bus = new TestEventBus();
 const receivedEvents: string[] = [];
 
 const unsub = bus.onEvent((event) => {
@@ -46,14 +69,14 @@ console.log('  ✓ Event bus works');
 
 console.log('Test 2: askUser...');
 
-const bus2 = new OrchestratorEventBus();
+const bus2 = new TestEventBus();
 let questionAsked = false;
 let resolver: ((response: string) => void) | null = null;
 
 bus2.onEvent((event) => {
-  if (event.type === 'user_question') {
+  if (event.type === 'user_question' && typeof event.resolve === 'function') {
     questionAsked = true;
-    resolver = event.resolve;
+    resolver = event.resolve as (response: string) => void;
   }
 });
 
@@ -79,7 +102,7 @@ db.createRun('run-test', 'Test goal');
 
 const config = loadConfig(path.resolve(import.meta.dirname, '../../shepherds-pi.yaml'));
 const tools = createOrchestratorTools({
-  eventBus: new OrchestratorEventBus(),
+  eventBus: new TestEventBus(),
   db,
   config,
   getRunId: () => 'run-test',

@@ -1,40 +1,35 @@
 # Shepherds Pi
 
-Local CLI tool that automates software development by coordinating specialized AI agents through an LLM-powered Orchestrator. Users set goals via a TUI, the Orchestrator plans and dispatches agents, reviews results, iterates, and merges code back into the project repository.
+Local CLI tool that automates software development by coordinating specialized AI agents through a coordinator persona running directly in pi. Shepherds-Pi launches pi with a coordinator system prompt and a Shepherds extension that provides orchestration tools.
 
-**Everything is pi** — the Orchestrator is a pi SDK session, agents are pi CLI processes in Docker containers. No custom agent runtime.
+**Everything is pi** — coordinator and UI are native pi; Shepherds contributes extension tools for spawning and managing agent containers.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                    Ink TUI                           │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
-│  │Chat Pane │  │Agent List│  │Plan View / Detail │  │
-│  └────┬─────┘  └────┬─────┘  └────────┬─────────┘  │
-│       └──────────────┼─────────────────┘            │
-│                      │                              │
-│              OrchestratorManager                     │
-│              (bridge: TUI state ↔ sessions)         │
-└──────────────────────┼──────────────────────────────┘
+│                  shepherds-pi CLI                    │
+│  - resolves shepherds-pi.yaml                        │
+│  - launches pi with coordinator system prompt        │
+│  - loads Shepherds extension tools                   │
+└──────────────────────┬──────────────────────────────┘
                        │
               ┌────────┴────────┐
-              │  Orchestrator   │  pi SDK session with
-              │  (coordinator)  │  10 custom tools, no coding tools
+              │       pi        │  default pi UI + session runtime
+              │   coordinator   │  no built-in coding tools enabled
               └────────┬────────┘
-                       │
+                       │ calls custom tools
           ┌────────────┼────────────┐
           │            │            │
     ┌─────┴─────┐ ┌───┴────┐ ┌────┴─────┐
     │  Agent 1  │ │ Agent 2│ │ Agent N  │   Docker containers
-    │ (persona) │ │(persona│ │ (persona)│   running pi --mode json
-    │  o3       │ │sonnet-4│ │gemini-2.5│   mounted worktree/clone → work → host/container git finalize
+    │ (persona) │ │(persona│ │ (persona)│   mounted worktree/clone → work → host/container git finalize
     └───────────┘ └────────┘ └──────────┘
 ```
 
 ### Key Design Decisions
 
-- **Orchestrator coordinates, never codes** — only has orchestration tools (spawn_agent, create_branch, read_plan, etc.), no read/write/edit/bash
+- **Coordinator coordinates, never codes** — Shepherds launches pi with `--no-builtin-tools`; only orchestration extension tools are active
 - **Agents are one-shot Docker containers** — spawned with a persona + instructions, write `/output/result.json` when done, container is removed
 - **Host-managed git supported via worktrees** — branch worktrees are prepared on host and mounted into containers
 - **All communication routed through Orchestrator** — agents never talk to each other
@@ -64,41 +59,29 @@ shepherds-pi/
 │       └── skills/*/
 │           └── SKILL.md        # Workflow skills + summarize handoff contract
 ├── src/
-│   ├── index.tsx               # Entry point — loads config, renders TUI
-│   ├── App.tsx                 # Main TUI component (Ink/React)
-│   ├── types.ts                # Shared TypeScript types
-│   ├── utils.ts                # Helpers (getElapsed, path normalization)
+│   ├── cli.ts                  # Entry point — runs init/doctor/setup or launches pi coordinator mode
+│   ├── utils.ts                # Helpers
 │   ├── config/
 │   │   └── index.ts            # Loads shepherds-pi.yaml + .env + auth fallbacks
 │   ├── db/
-│   │   └── index.ts            # SQLite (better-sqlite3) — runs, plans, agents, log, messages
+│   │   └── index.ts            # SQLite (runs, plans, agents, log, messages)
 │   ├── persona/
-│   │   └── index.ts            # Loads persona dirs, builds agent prompts
+│   │   └── index.ts            # Loads persona dirs used by spawned agents
 │   ├── agent/
 │   │   └── spawner.ts          # Docker container lifecycle via dockerode
 │   ├── git/
 │   │   ├── worktree-manager.ts # Host worktree lifecycle + branch lease locks
 │   │   └── host-git-manager.ts # Host-side add/commit/push finalization
 │   ├── orchestrator/
-│   │   ├── coordinator.md      # Orchestrator system prompt
-│   │   ├── event-bus.ts        # Typed event bus (TUI ↔ session communication)
-│   │   ├── tools.ts            # 10 orchestration tools (defineTool from pi SDK)
-│   │   ├── session.ts          # Creates pi SDK session with custom tools
-│   │   └── manager.ts          # Bridge: manages goals, routes events, updates TUI state
-│   ├── components/             # Ink TUI components
-│   │   ├── ChatPane.tsx        # Message display (no truncation, wraps naturally)
-│   │   ├── AgentList.tsx       # Agent status sidebar
-│   │   ├── AgentDetail.tsx     # Expanded agent view
-│   │   ├── GoalTabs.tsx        # Goal switcher (1-9 keys)
-│   │   ├── PlanView.tsx        # Implementation plan display
-│   │   └── InputBar.tsx        # User input with ask_user support
+│   │   ├── coordinator.md      # Coordinator system prompt passed to pi
+│   │   └── tools.ts            # Orchestration tools (spawn_agent, update_plan, ask_user, etc.)
+│   ├── extensions/
+│   │   └── shepherds/index.ts  # Pi extension registering Shepherds tools + status widget
+│   ├── commands/               # init / doctor / setup subcommands
 │   └── test/                   # Test scripts
 │       ├── foundation.ts       # DB, config, persona loading
 │       ├── orchestrator.ts     # Event bus, tools, DB operations
-│       ├── manager.ts          # Manager state, conversions
 │       ├── sanitize.ts         # JSON control-char sanitizer
-│       ├── translator.ts       # Event translation tests
-│       ├── notify.ts           # Notification scheduler tests
 │       ├── worktree-manager.ts # Worktree + branch lock tests
 │       ├── host-git-manager.ts # Host commit/push finalization tests
 │       └── spawn-agent.ts      # End-to-end Docker agent test
@@ -109,7 +92,7 @@ shepherds-pi/
 
 ## Orchestrator Tools
 
-The coordinator has 10 tools (no coding tools):
+The coordinator has orchestration tools (no coding tools):
 
 | Tool | Purpose |
 |------|---------|
@@ -121,8 +104,9 @@ The coordinator has 10 tools (no coding tools):
 | `read_plan` | Read current plan from DB |
 | `update_plan` | Create/update the plan (versioned) |
 | `read_run_log` | Read chronological journal (survives compaction) |
-| `ask_user` | Pause and ask user a question (Promise-based) |
+| `ask_user` | Prompt the user for clarification/input |
 | `update_goal_status` | Signal goal progress |
+| `shepherd_set_goal` | Record/update the active run goal in Shepherds state |
 
 ## Setup
 
@@ -167,7 +151,7 @@ npx shepherds-pi
 shepherds-pi init [--force] [--no-personas]
 shepherds-pi doctor [--config <path>]
 shepherds-pi setup [--config <path>]
-shepherds-pi [--config <path>]
+shepherds-pi [--config <path>] [pi args...]
 ```
 
 Configuration resolution order:
@@ -175,23 +159,9 @@ Configuration resolution order:
 2. `SHEPHERDS_PI_CONFIG` env var
 3. nearest `shepherds-pi.yaml` by walking upward from current directory
 
-Type a goal in the TUI to start orchestration. The coordinator will plan, spawn agents, and coordinate the work.
+Start by describing your goal in the default pi prompt. The coordinator will plan, spawn agents, and coordinate the work using Shepherds tools.
 
 > Note: when using host-managed git mode (`git.repo_mode=worktree` + `git.git_ops_mode=host`), no in-container clone/commit/push is performed.
-
-## TUI Keybindings
-
-| Key | Action |
-|-----|--------|
-| `1-9` | Switch between goals |
-| `Tab` | Toggle focus (chat ↔ agents) |
-| `↑↓` | Navigate agent list |
-| `Enter` | Expand selected agent |
-| `Escape` | Go back |
-| `p` | Plan view |
-| `Ctrl+C` | Quit (stops active containers; worktree leases are released by runtime cleanup) |
-
-When the coordinator calls `ask_user`, the input bar highlights yellow and your next message resolves the question.
 
 ## Configuration
 
@@ -288,10 +258,7 @@ If you are maintaining and publishing Shepherds Pi (npm package + GHCR image), u
 # Unit tests (no API keys needed)
 npx tsx src/test/foundation.ts       # DB, config, personas
 npx tsx src/test/orchestrator.ts     # Event bus, tools, DB
-npx tsx src/test/manager.ts          # Manager state management
 npx tsx src/test/sanitize.ts         # JSON control-char sanitizer
-npx tsx src/test/translator.ts       # Event translation
-npx tsx src/test/notify.ts           # Notification scheduler
 npx tsx src/test/worktree-manager.ts # Worktree + lock behavior
 npx tsx src/test/host-git-manager.ts # Host git finalization
 
@@ -314,9 +281,8 @@ SHEPHERDS_TEST_BRANCH=shepherds-test/demo npx tsx src/test/spawn-agent.ts archit
 ## Known Issues / TODO
 
 - [ ] Compaction resilience — inject "call read_run_log" reminder when context is compacted
-- [ ] Streaming polish — show live agent output in expanded detail view
 - [ ] Error recovery — retry failed agents, escalate to user
-- [ ] Agent result display — render full findings/suggestions in expanded view
-- [ ] Multiple goals — test concurrent goals with separate sessions
-- [ ] Branch strategy UX — improve branch naming conventions + policy guidance for orchestrator-generated branches
+- [ ] Richer coordinator dashboard widget in pi UI (status/history drill-down)
+- [ ] Multiple goals — validate concurrent run handling and run selection ergonomics
+- [ ] Branch strategy UX — improve branch naming conventions + policy guidance for coordinator-generated branches
 - [ ] Prompt optimization — coordinator prompt may need tuning for emergent planning

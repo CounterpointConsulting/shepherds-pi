@@ -4,9 +4,32 @@ import os from 'node:os';
 import path from 'node:path';
 import { execSync, spawn, type ChildProcess } from 'node:child_process';
 import { ShepherdsDB } from '../db/index.js';
-import { OrchestratorEventBus, type OrchestratorEvent } from '../orchestrator/event-bus.js';
 import { createOrchestratorTools } from '../orchestrator/tools.js';
 import type { ShepherdsPiConfig } from '../config/index.js';
+
+interface OrchestratorEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
+class TestEventBus {
+  private listeners = new Set<(event: OrchestratorEvent) => void>();
+
+  emit(event: OrchestratorEvent): void {
+    for (const listener of this.listeners) listener(event);
+  }
+
+  onEvent(listener: (event: OrchestratorEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  askUser(question: string): Promise<string> {
+    return new Promise<string>((resolve) => {
+      this.emit({ type: 'user_question', question, resolve });
+    });
+  }
+}
 
 function run(cmd: string, cwd: string): string {
   return execSync(cmd, { cwd, stdio: 'pipe', encoding: 'utf-8' }).trim();
@@ -394,7 +417,7 @@ async function main(): Promise<void> {
     const runId = `run-e2e-clone-${Date.now().toString(36)}`;
     db.createRun(runId, 'E2E clone+container handoff test');
 
-    const eventBus = new OrchestratorEventBus();
+    const eventBus = new TestEventBus();
     const events: OrchestratorEvent[] = [];
     const unsubscribe = eventBus.onEvent((event) => {
       events.push(event);
@@ -501,13 +524,13 @@ async function main(): Promise<void> {
     assertCondition(doneCount === 5 && failedCount === 1,
       `Expected done=5 and failed=1, got done=${doneCount}, failed=${failedCount}`);
 
-    const hostGitEvents = events.filter((e): e is Extract<OrchestratorEvent, { type: 'agent_event' }> => {
+    const hostGitEvents = events.filter((e) => {
       if (e.type !== 'agent_event' || !isRecord(e.event)) return false;
       return e.event.type === 'host_git_finalized' || e.event.type === 'host_git_failed';
     });
     assertCondition(hostGitEvents.length === 0, 'Clone/container mode should not emit host_git_* events');
 
-    const worktreeEvents = events.filter((e): e is Extract<OrchestratorEvent, { type: 'agent_event' }> => {
+    const worktreeEvents = events.filter((e) => {
       return e.type === 'agent_event' && isRecord(e.event) && e.event.type === 'worktree_acquired';
     });
     assertCondition(worktreeEvents.length === 0, 'Clone mode should not emit worktree_acquired events');

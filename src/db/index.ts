@@ -107,6 +107,10 @@ export class ShepherdsDB {
     this.db.prepare("UPDATE runs SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, id);
   }
 
+  updateRunGoal(id: string, goal: string): void {
+    this.db.prepare("UPDATE runs SET goal = ?, updated_at = datetime('now') WHERE id = ?").run(goal, id);
+  }
+
   listRuns(): DbRun[] {
     return this.db.prepare('SELECT * FROM runs ORDER BY created_at DESC').all() as DbRun[];
   }
