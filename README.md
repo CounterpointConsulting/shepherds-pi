@@ -4,6 +4,10 @@ Local CLI tool that automates software development by coordinating specialized A
 
 **Everything is pi** — coordinator and UI are native pi; Shepherds contributes extension tools for spawning and managing agent containers.
 
+> Working on this repo with an AI agent? See [`AGENTS.md`](./AGENTS.md) for a
+> concise architecture/implementation reference and the gotchas that matter
+> (modes, the agent image, and how to keep test projects in sync).
+
 ## Architecture
 
 ```
@@ -37,20 +41,39 @@ Local CLI tool that automates software development by coordinating specialized A
 - **Run log as external memory** — survives context compaction, queryable via `read_run_log` tool
 - **Per-persona model selection** — o3 for planning/integration, claude-sonnet-4 for coding, gemini-2.5-pro for review
 
+### Coordinator Behavior Rules
+
+The coordinator prompt (`src/orchestrator/coordinator.md`) enforces:
+
+- **Concrete success criteria** — every task/step must have objectively
+  verifiable success criteria defined when the agent is dispatched.
+- **Mandatory test-agent verification** — before a task is considered complete,
+  a test agent must verify the criteria and report back. For web apps the
+  `web-tester` MUST use the **playwright skill**. Self-reported success from the
+  implementing agent is not sufficient.
+- **Send-back on failure** — if verification fails, the task goes back to an
+  agent of the appropriate type for revision with the test findings.
+- **Retry cap / stuck detection** — a given task is dispatched at most **10
+  times** (initial + revisions); after that the coordinator stops and alerts the
+  user that the agents are stuck.
+- **Quality gates** — every implementation is reviewed AND tested before the
+  integrator merges.
+
 ## Project Structure
 
 ```
 shepherds-pi/
 ├── docker/
-│   ├── Dockerfile              # Agent container image (Node 20 + pi)
-│   └── entrypoint.sh           # Prepare repo (clone or mounted), run pi, optional in-container git finalize
+│   ├── Dockerfile              # Agent container image (Node 20 + pi + Playwright/Chromium)
+│   └── entrypoint.sh           # Prepare repo (clone or mounted), load persona skills, run pi, optional in-container git finalize
 ├── personas/
 │   ├── architect/              # o3 — designs solutions, creates plans
 │   ├── dba/                    # claude-sonnet-4 — schemas, migrations
 │   ├── typescript-api-dev/     # claude-sonnet-4 — backend API code
 │   ├── typescript-react-dev/   # claude-sonnet-4 — frontend React code
 │   ├── code-reviewer/          # gemini-2.5-pro — reviews code quality
-│   ├── web-tester/             # claude-sonnet-4 — tests web apps
+│   ├── web-tester/             # claude-sonnet-4 — tests web apps via playwright (mandatory)
+│   │   └── skills/playwright-skill/  # bundled browser automation (no node_modules)
 │   ├── integrator/             # o3 — merges branches, resolves conflicts
 │   ├── using-agent-skills/     # shared meta-skill for dynamic workflow skill selection
 │   └── <persona>/
@@ -77,6 +100,8 @@ shepherds-pi/
 │   │   └── tools.ts            # Orchestration tools (spawn_agent, update_plan, ask_user, etc.)
 │   ├── extensions/
 │   │   └── shepherds/index.ts  # Pi extension registering Shepherds tools + status widget
+│   ├── scripts/
+│   │   └── docker-build.ts     # `npm run docker:build` wrapper
 │   ├── commands/               # init / doctor / setup subcommands
 │   └── test/                   # Test scripts
 │       ├── foundation.ts       # DB, config, persona loading
@@ -85,7 +110,13 @@ shepherds-pi/
 │       ├── worktree-manager.ts # Worktree + branch lock tests
 │       ├── host-git-manager.ts # Host commit/push finalization tests
 │       └── spawn-agent.ts      # End-to-end Docker agent test
+├── scripts/
+│   ├── copy-assets.mjs         # Copies coordinator.md into dist/ during build
+│   └── sync-to-project.mjs     # Re-sync source → a test/consumer project (npm run sync)
+├── templates/
+│   └── shepherds-pi.yaml       # Template config scaffolded by `init`
 ├── shepherds-pi.yaml           # Project configuration
+├── AGENTS.md                   # Architecture/impl reference for agents working on this repo
 ├── .env.example                # Template for secrets (gitignored)
 └── SPEC.md                     # Full specification (~1400 lines)
 ```
@@ -184,6 +215,9 @@ project:
   dev_branch: dev
   main_branch: main
 docker:
+  # Use the published image for normal use. When developing Shepherds Pi
+  # locally, point this at your locally-built tag (e.g. shepherds-pi-agent:latest)
+  # — `npm run sync` does this for you. See "Developing Shepherds Pi".
   image: ghcr.io/counterpointconsulting/shepherds-pi-agent:latest
   working_dir: /workspace/repo
 openrouter:
@@ -245,6 +279,65 @@ Workflow skills should follow a consistent template. Use:
 ```
 
 Agents should load only the minimum relevant skills for the task, and always complete with `summarize`.
+
+## Web Testing (Playwright)
+
+The `web-tester` persona is required to verify web-application changes with a
+real browser before they can be accepted.
+
+- The **playwright skill** is bundled in the persona at
+  `personas/web-tester/skills/playwright-skill/` (SKILL.md, run.js,
+  lib/helpers.js, API_REFERENCE.md) — **without** `node_modules`.
+- The agent **Docker image** installs Playwright + Chromium globally
+  (`docker/Dockerfile`, `PLAYWRIGHT_BROWSERS_PATH=/ms-playwright`), so the
+  read-only-mounted skill can run browsers without a local install.
+- `run.js` is adapted for the container: it resolves the global Playwright
+  (`npm root -g`), writes temp scripts to `/tmp` (`PLAYWRIGHT_SKILL_TMP`), skips
+  auto-install (`PLAYWRIGHT_SKILL_NO_INSTALL=1`), and defaults Chromium launches
+  to `--no-sandbox` (the hardened container is the sandbox; opt out with
+  `PLAYWRIGHT_SKILL_SANDBOX=1`).
+- The coordinator dispatches `web-tester` with
+  `requestedSkills: playwright-skill` plus the task's success criteria.
+
+## Developing Shepherds Pi
+
+When you change source in this repo and consume it from another project, three
+artifacts can drift independently:
+
+1. **CLI / coordinator code** — the global `shepherds-pi` runs `dist/`, so
+   changes to TS or `coordinator.md` require `npm run build`.
+2. **Agent Docker image** — entrypoint / Playwright / persona-skill changes
+   require rebuilding the image, and the consuming project's `shepherds-pi.yaml`
+   `image:` must point at that tag (not a stale published GHCR tag).
+3. **Personas** — `shepherds-pi init` copies them into
+   `<project>/.shepherds-pi/personas` once; they are not auto-updated afterward.
+
+Use the sync script to update all three in one step:
+
+```bash
+npm run sync -- <path-to-project>              # build CLI + image, sync personas, pin image tag
+npm run sync -- <path-to-project> --no-docker  # persona/coordinator-only changes (skip image rebuild)
+npm run sync -- <path-to-project> --no-build   # skip the CLI build
+npm run sync -- <path-to-project> --image <tag>
+```
+
+`scripts/sync-to-project.mjs` runs `npm run build`, builds
+`shepherds-pi-agent:latest`, **replaces** the project's `.shepherds-pi/personas`
+(source is the source of truth), and rewrites the `image:` line in the project's
+`shepherds-pi.yaml` to the local tag.
+
+> Drift trap: a container error of `GIT_URL not set` while your config uses
+> `repo_mode: worktree` usually means the project is pointed at an **old**
+> published image whose entrypoint only supports clone mode. Re-run `npm run sync`.
+
+Common build commands:
+
+```bash
+npm run build         # clean + tsc + copy coordinator.md into dist/
+npm run dev           # run the CLI from source via tsx
+npm run docker:build  # build the shepherds-pi-agent:latest image
+npm run typecheck
+```
 
 ## Release / Publisher Setup
 
