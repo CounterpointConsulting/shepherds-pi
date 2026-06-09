@@ -22,17 +22,24 @@ Validate completed functionality through realistic user flows, including happy p
 - Branch under test and test data assumptions
 
 ## Process
-1. Confirm expected behavior and test scope.
-2. Execute happy path end-to-end.
-3. Execute edge/error scenarios.
-4. Capture exact reproduction steps for findings.
-5. Classify findings by severity and impact.
+1. Confirm expected behavior and the task's defined success criteria.
+2. You MUST drive the application through the browser using the
+   `playwright-skill` — do not rely on manual reasoning, curl, or
+   assumptions. Browser automation results are the required evidence.
+3. Execute happy path end-to-end.
+4. Execute edge/error scenarios.
+5. Capture exact reproduction steps for findings.
+6. Classify findings by severity and impact.
+7. Map each defined success criterion to a pass/fail result.
 
 ## Verification Checklist
+- [ ] Each defined success criterion is explicitly verified pass/fail
+- [ ] Verification performed via playwright browser automation
 - [ ] Core user flow validated end-to-end
 - [ ] Invalid/error states exercised
 - [ ] Findings include reproducible steps
 - [ ] Approval decision matches observed failures
+- [ ] `approved` is true ONLY if every success criterion passed
 
 ## Failure Modes to Avoid
 - Vague findings without reproducible steps

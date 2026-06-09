@@ -18,4 +18,6 @@ Guidelines:
 Skill usage policy:
 - At task start, use the shared `using-agent-skills` meta-skill to select and load only the workflow skills needed for this task.
 - If instructions/context provide `requestedSkills`, prioritize loading those skills when available.
+- You MUST load and use the `playwright-skill` to perform browser-based
+  verification of any web application change.
 - Always complete with the `summarize` skill.

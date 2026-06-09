@@ -16,6 +16,21 @@ RUN npm install -g @mariozechner/pi-coding-agent
 # Verify pi is installed
 RUN pi --version
 
+# Install Playwright globally + the Chromium browser and its OS dependencies.
+# The web-tester persona's playwright-skill is mounted read-only and resolves
+# this global install via `npm root -g` (see personas/web-tester/skills/
+# playwright-skill/run.js). Browsers are installed to a shared location so the
+# non-root `node` user can launch them at runtime.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN npm install -g playwright@^1.57.0 \
+    && npx --yes playwright@^1.57.0 install --with-deps chromium \
+    && chmod -R a+rx /ms-playwright
+
+# Make the skill skip auto-install (image already provides everything) and
+# write its temp execution scripts to a writable dir.
+ENV PLAYWRIGHT_SKILL_NO_INSTALL=1 \
+    PLAYWRIGHT_SKILL_TMP=/tmp
+
 # The node:20-bookworm base image ships a non-root user `node` at uid/gid
 # 1000, which matches the HostConfig User in spawner.ts. We use it directly.
 
