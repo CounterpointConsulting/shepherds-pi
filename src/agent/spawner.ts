@@ -136,6 +136,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   const containerCreateBase = {
     Image: opts.config.docker.image,
+    AttachStdout: true,
+    AttachStderr: true,
     Env: env,
     User: '1000:1000',
     HostConfig: {
@@ -206,11 +208,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   try {
     // ─── 6. Stream stdout/stderr ───────────────────────────────
-    const logStream = await container.logs({
-      stdout: true,
-      stderr: true,
-      follow: true,
-    });
+    const logStream = await openContainerOutputStream(container, opts.onEvent);
 
     const { PassThrough } = await import('node:stream');
     const stdoutStream = new PassThrough();
@@ -341,6 +339,34 @@ export async function ensureImage(imageName?: string): Promise<void> {
   }
 }
 
+async function openContainerOutputStream(
+  container: Docker.Container,
+  onEvent?: (event: Record<string, unknown>) => void,
+): Promise<NodeJS.ReadableStream> {
+  try {
+    // Use live attach stream by default to avoid dependency on daemon log-driver
+    // read support (`docker logs`) across environments.
+    return await container.attach({
+      stream: true,
+      stdout: true,
+      stderr: true,
+      logs: false,
+    });
+  } catch (attachErr: unknown) {
+    const message = getDockerErrorMessage(attachErr);
+    onEvent?.({
+      type: 'container_stderr',
+      line: `Container attach failed (${message}); falling back to docker logs stream.`,
+    });
+
+    return await container.logs({
+      stdout: true,
+      stderr: true,
+      follow: true,
+    });
+  }
+}
+
 /**
  * Sanitize JSON string by escaping control characters inside string values.
  * LLMs often write result.json with literal newlines/tabs inside strings
@@ -453,6 +479,24 @@ function isContainerNameConflict(err: unknown): boolean {
   const statusCode = (err as { statusCode?: unknown }).statusCode;
   if (statusCode === 409) return true;
 
-  const message = (err as { message?: unknown }).message;
-  return typeof message === 'string' && message.toLowerCase().includes('name is already in use');
+  const message = getDockerErrorMessage(err);
+  return message.toLowerCase().includes('name is already in use');
+}
+
+function getDockerErrorMessage(err: unknown): string {
+  if (!err || typeof err !== 'object') {
+    return String(err ?? '');
+  }
+
+  const direct = (err as { message?: unknown }).message;
+  if (typeof direct === 'string' && direct.trim()) {
+    return direct;
+  }
+
+  const jsonMessage = (err as { json?: { message?: unknown } }).json?.message;
+  if (typeof jsonMessage === 'string' && jsonMessage.trim()) {
+    return jsonMessage;
+  }
+
+  return String(err);
 }

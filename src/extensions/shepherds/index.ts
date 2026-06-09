@@ -65,6 +65,17 @@ export default function shepherdsExtension(pi: ExtensionAPI): void {
     const s = getState(ctx);
 
     const tools = createOrchestratorTools({
+      eventBus: {
+        emit: (event) => {
+          if (event.type === 'user_question' && typeof event.question === 'string') {
+            ctx.ui.notify(`Coordinator asks: ${event.question}`, 'info');
+          }
+        },
+        askUser: async (question: string): Promise<string> => {
+          const response = await ctx.ui.input(`Question from coordinator: ${question}`, 'Type your response');
+          return response ?? '';
+        },
+      },
       db: s.db,
       config: s.config,
       getRunId: () => s.runId,

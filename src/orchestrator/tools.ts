@@ -761,7 +761,9 @@ function askUserTool(eventBus: OrchestratorEventBusLike | undefined): ToolDefini
         };
       }
 
-      const response = await ctx.ui.input('Question from coordinator', params.question);
+      // Put the question in the dialog title (not placeholder) so it is visible
+      // in UIs/clients that do not render input placeholders.
+      const response = await ctx.ui.input(`Question from coordinator: ${params.question}`, 'Type your response');
       return {
         content: [{ type: 'text' as const, text: response ?? '' }],
         details: { cancelled: response == null } as Record<string, unknown>,
