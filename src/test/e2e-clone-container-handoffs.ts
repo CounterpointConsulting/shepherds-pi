@@ -411,6 +411,14 @@ async function main(): Promise<void> {
         authorEmail: 'agent@shepherds-pi.dev',
         resetWorktreeBeforeRun: true,
       },
+      beads: {
+        enabled: false,
+        binary: 'bd',
+        repoPath: repoDir,
+        requireBeadOnSpawn: true,
+        stuckDispatchLimit: 10,
+        actor: 'shepherds-coordinator',
+      },
     };
 
     db = new ShepherdsDB(dbPath);

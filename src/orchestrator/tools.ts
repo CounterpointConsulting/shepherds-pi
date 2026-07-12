@@ -7,6 +7,8 @@ import { loadPersona } from '../persona/index.js';
 import { spawnAgent } from '../agent/spawner.js';
 import { WorktreeManager, type WorktreeLease } from '../git/worktree-manager.js';
 import { finalizeAgentChanges } from '../git/host-git-manager.js';
+import { BeadsClient } from '../beads/client.js';
+import { createBeadsTools, prepareBeadForSpawn } from '../beads/tools.js';
 import simpleGit from 'simple-git';
 import crypto from 'node:crypto';
 
@@ -34,18 +36,45 @@ export function createOrchestratorTools(deps: {
     })
     : null;
 
-  return [
-    createSpawnAgentTool(eventBus, db, config, getRunId, worktreeManager),
-    createSpawnAgentsTool(eventBus, db, config, getRunId, worktreeManager),
+  const beadsClient = config.beads.enabled
+    ? new BeadsClient({
+      binary: config.beads.binary,
+      cwd: config.beads.repoPath || config.project.repoPath,
+      actor: config.beads.actor,
+      forceLocalRepo: true,
+    })
+    : null;
+
+  const tools: ToolDefinition[] = [
+    createSpawnAgentTool(eventBus, db, config, getRunId, worktreeManager, beadsClient),
+    createSpawnAgentsTool(eventBus, db, config, getRunId, worktreeManager, beadsClient),
     createBranchTool(eventBus, config),
     listBranchesTool(config),
     getBranchDiffTool(config),
-    readPlanTool(db, getRunId),
-    updatePlanTool(eventBus, db, getRunId),
+  ];
+
+  // Beads mode: work graph is the plan of record — do not dual-write free-form plan JSON.
+  if (config.beads.enabled && beadsClient) {
+    tools.push(
+      ...createBeadsTools({
+        client: beadsClient,
+        config: config.beads,
+        db,
+        getRunId,
+        eventBus,
+      }),
+    );
+  } else {
+    tools.push(readPlanTool(db, getRunId), updatePlanTool(eventBus, db, getRunId));
+  }
+
+  tools.push(
     readRunLogTool(db, getRunId),
     askUserTool(eventBus),
     updateGoalStatusTool(eventBus, db, getRunId),
-  ];
+  );
+
+  return tools;
 }
 
 // ─── Parameter schemas ───────────────────────────────────────────
@@ -55,6 +84,12 @@ const SpawnAgentParams = Type.Object({
   instructions: Type.String({ description: 'Task instructions for the agent' }),
   branch: Type.Optional(Type.String({ description: 'Git branch for the agent to work on' })),
   context: Type.Optional(Type.String({ description: 'Additional context for the agent' })),
+  beadId: Type.Optional(Type.String({
+    description: 'Beads task id this spawn fulfills (required when beads.enabled and require_bead_on_spawn)',
+  })),
+  requestedSkills: Type.Optional(Type.Array(Type.String(), {
+    description: 'Optional skill names to prioritize (e.g. playwright-skill)',
+  })),
 });
 
 const SpawnAgentsParams = Type.Object({
@@ -63,6 +98,8 @@ const SpawnAgentsParams = Type.Object({
     instructions: Type.String({ description: 'Task instructions' }),
     branch: Type.Optional(Type.String({ description: 'Git branch' })),
     context: Type.Optional(Type.String({ description: 'Additional context' })),
+    beadId: Type.Optional(Type.String({ description: 'Beads task id this spawn fulfills' })),
+    requestedSkills: Type.Optional(Type.Array(Type.String())),
   })),
 });
 
@@ -155,11 +192,14 @@ interface ExecuteAgentSpec {
   db: ShepherdsDB;
   config: ShepherdsPiConfig;
   worktreeManager: WorktreeManager | null;
+  beadsClient: BeadsClient | null;
   runId: string;
   personaName: string;
   instructions: string;
   context?: string;
   branch?: string;
+  beadId?: string;
+  requestedSkills?: string[];
   logMode: SpawnLogMode;
 }
 
@@ -183,15 +223,25 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
     db,
     config,
     worktreeManager,
+    beadsClient,
     runId,
     personaName,
     instructions,
     context,
     branch,
+    beadId,
+    requestedSkills,
     logMode,
   } = spec;
 
   assertGitModeCompatibility(config);
+
+  if (config.beads.enabled && config.beads.requireBeadOnSpawn && !beadId) {
+    return {
+      ok: false,
+      error: 'beads.enabled requires beadId on every spawn_agent call. Create/claim a bead first.',
+    };
+  }
 
   const persona = loadPersona(personaName, `${config.personasDir}/${personaName}`);
   if (!persona) {
@@ -205,14 +255,57 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
   const branchName = branch ?? config.project.devBranch;
   let lease: WorktreeLease | null = null;
 
+  let effectiveInstructions = instructions;
+  let effectiveContext = context ?? '';
+
+  if (beadId && beadsClient) {
+    try {
+      const bead = await prepareBeadForSpawn(beadsClient, config.beads, beadId, agentId);
+      const beadContext = {
+        beadId: bead.id,
+        title: bead.title,
+        acceptance: bead.acceptance,
+        labels: bead.labels,
+        parent: bead.parent,
+        dispatchCount: bead.dispatchCount,
+      };
+      // Keep on context (not instructions) so coordinator/directive tokens stay intact
+      // for scripts and so specialists still see acceptance + bead identity.
+      const acceptanceBlock = bead.acceptance
+        ? `Success criteria (from bead ${bead.id}):\n${bead.acceptance}`
+        : '';
+      effectiveContext = [
+        effectiveContext,
+        `beads: ${JSON.stringify(beadContext)}`,
+        acceptanceBlock,
+      ].filter(Boolean).join('\n');
+      db.appendLog(
+        runId,
+        'bead_dispatch',
+        { agentId, beadId: bead.id, dispatchCount: bead.dispatchCount },
+        `Dispatch bead ${bead.id} via ${agentId} (count=${bead.dispatchCount})`,
+      );
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: message };
+    }
+  }
+
+  if (requestedSkills && requestedSkills.length > 0) {
+    effectiveContext = [
+      effectiveContext,
+      `requestedSkills: ${JSON.stringify(requestedSkills)}`,
+    ].filter(Boolean).join('\n');
+  }
+
   db.createAgentRun({
     id: agentId,
     run_id: runId,
-    step_id: null,
+    step_id: beadId ?? null,
     persona: persona.name,
     model: persona.model,
-    instructions,
-    context: context ?? null,
+    instructions: effectiveInstructions,
+    context: effectiveContext || null,
     branch: branchName,
     container_id: null,
     status: 'spawning',
@@ -270,8 +363,8 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
     const spawnResult = await spawnAgent({
       agentId,
       persona,
-      instructions,
-      context,
+      instructions: effectiveInstructions,
+      context: effectiveContext || undefined,
       branch: branchName,
       repoMode: config.git.repoMode,
       gitOpsMode: config.git.gitOpsMode,
@@ -355,11 +448,23 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
         ? `Agent completed: ${agentId}`
         : `Agent completed: ${agentId} — ${spawnResult.result?.summary ?? 'no summary'}`;
 
-      db.appendLog(runId, 'agent_completed', { agentId }, completedSummary);
+      db.appendLog(runId, 'agent_completed', { agentId, beadId }, completedSummary);
       eventBus?.emit({ type: 'agent_completed', agentId, result: spawnResult.result });
     } else {
-      db.appendLog(runId, 'agent_failed', { agentId, exitCode: spawnResult.exitCode, timedOut: spawnResult.timedOut }, `Agent failed: ${agentId} — ${failReason}`);
+      db.appendLog(runId, 'agent_failed', { agentId, beadId, exitCode: spawnResult.exitCode, timedOut: spawnResult.timedOut }, `Agent failed: ${agentId} — ${failReason}`);
       eventBus?.emit({ type: 'agent_failed', agentId, error: failReason });
+    }
+
+    // Coordinator closes beads explicitly (pipeline Option B). Spawn only appends notes.
+    if (beadId && beadsClient) {
+      const summary = status === 'done'
+        ? (spawnResult.result?.summary ?? 'agent completed')
+        : failReason;
+      try {
+        await beadsClient.appendSpawnResult(beadId, `${status}: ${summary}`);
+      } catch {
+        /* non-fatal: run_log still has the result */
+      }
     }
 
     return {
@@ -399,17 +504,19 @@ function createSpawnAgentTool(
   config: ShepherdsPiConfig,
   getRunId: () => string,
   worktreeManager: WorktreeManager | null,
+  beadsClient: BeadsClient | null,
 ): ToolDefinition<typeof SpawnAgentParams> {
   return defineTool({
     name: 'spawn_agent',
     label: 'Spawn Agent',
     description:
       'Spawn a single agent container with a specific persona and instructions. ' +
-      'Blocks until the agent completes and returns its structured result.',
+      'Blocks until the agent completes and returns its structured result. ' +
+      'When beads is enabled, beadId is required; spawn claims the bead and increments dispatch count but does not close it.',
     parameters: SpawnAgentParams,
     promptSnippet: 'Spawn an agent to implement, review, or test code',
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      const { persona: personaName, instructions, branch, context } = params;
+      const { persona: personaName, instructions, branch, context, beadId, requestedSkills } = params;
       const runId = getRunId();
 
       const outcome = await executeAgentRun({
@@ -417,11 +524,14 @@ function createSpawnAgentTool(
         db,
         config,
         worktreeManager,
+        beadsClient,
         runId,
         personaName,
         instructions,
         context,
         branch,
+        beadId,
+        requestedSkills,
         logMode: 'single',
       });
 
@@ -445,6 +555,7 @@ function createSpawnAgentTool(
           status,
           timedOut: spawnResult.timedOut,
           hostGit,
+          beadId,
         } as Record<string, unknown>,
       };
     },
@@ -459,6 +570,7 @@ function createSpawnAgentsTool(
   config: ShepherdsPiConfig,
   getRunId: () => string,
   worktreeManager: WorktreeManager | null,
+  beadsClient: BeadsClient | null,
 ): ToolDefinition<typeof SpawnAgentsParams> {
   return defineTool({
     name: 'spawn_agents',
@@ -479,11 +591,14 @@ function createSpawnAgentsTool(
             db,
             config,
             worktreeManager,
+            beadsClient,
             runId,
             personaName: agentSpec.persona,
             instructions: agentSpec.instructions,
             context: agentSpec.context,
             branch: agentSpec.branch,
+            beadId: agentSpec.beadId,
+            requestedSkills: agentSpec.requestedSkills,
             logMode: 'parallel',
           });
 

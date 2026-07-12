@@ -31,3 +31,12 @@ git:
   author_name: Shepherds Pi Agent
   author_email: agent@shepherds-pi.dev
   reset_worktree_before_run: true
+
+# Beads work-graph integration (default off until enabled per project)
+beads:
+  enabled: false
+  binary: bd
+  repo_path: .
+  require_bead_on_spawn: true
+  stuck_dispatch_limit: 10
+  actor: shepherds-coordinator

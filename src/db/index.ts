@@ -252,8 +252,11 @@ function filterToEventTypes(filter: string): string[] {
   switch (filter) {
     case 'agents': return ['agent_spawned', 'agent_completed', 'agent_failed'];
     case 'branches': return ['branch_created'];
-    case 'plan': return ['plan_created', 'plan_updated'];
-    case 'latest': return ['agent_completed', 'agent_failed', 'status_changed', 'plan_created', 'plan_updated'];
+    case 'plan': return ['plan_created', 'plan_updated', 'bead_created', 'bead_updated', 'bead_closed', 'bead_dispatch'];
+    case 'latest': return [
+      'agent_completed', 'agent_failed', 'status_changed', 'plan_created', 'plan_updated',
+      'bead_created', 'bead_closed', 'bead_dispatch',
+    ];
     default: return [];
   }
 }

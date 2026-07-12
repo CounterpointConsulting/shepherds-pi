@@ -41,6 +41,21 @@ export interface GitConfig {
   resetWorktreeBeforeRun: boolean;
 }
 
+export interface BeadsConfig {
+  /** When true, coordinator uses Beads as the work-graph plan of record. */
+  enabled: boolean;
+  /** `bd` binary name or absolute path. */
+  binary: string;
+  /** Directory containing `.beads/` (default project.repoPath). */
+  repoPath: string;
+  /** Reject spawn_agent without beadId when enabled. */
+  requireBeadOnSpawn: boolean;
+  /** Max implement dispatches before stuck detection. */
+  stuckDispatchLimit: number;
+  /** Audit actor passed to bd --actor. */
+  actor: string;
+}
+
 export interface ShepherdsPiConfig {
   version: number;
   project: ProjectConfig;
@@ -50,6 +65,7 @@ export interface ShepherdsPiConfig {
   personasDir: string;
   agent: AgentConfig;
   git: GitConfig;
+  beads: BeadsConfig;
 }
 
 /**
@@ -94,6 +110,7 @@ export function loadConfig(configPath: string): ShepherdsPiConfig {
   const coordinator = parsed.coordinator as Record<string, unknown> ?? {};
   const agent = parsed.agent as Record<string, unknown> ?? {};
   const git = parsed.git as Record<string, unknown> ?? {};
+  const beads = parsed.beads as Record<string, unknown> ?? {};
 
   const configDir = path.dirname(path.resolve(configPath));
 
@@ -150,6 +167,19 @@ export function loadConfig(configPath: string): ShepherdsPiConfig {
       authorName: (git.author_name as string) ?? 'Shepherds Pi Agent',
       authorEmail: (git.author_email as string) ?? 'agent@shepherds-pi.dev',
       resetWorktreeBeforeRun: (git.reset_worktree_before_run as boolean) ?? true,
+    },
+    beads: {
+      enabled: (beads.enabled as boolean) ?? false,
+      binary: (beads.binary as string) ?? 'bd',
+      repoPath: path.resolve(
+        configDir,
+        (beads.repo_path as string)
+          ?? (project.repo_path as string)
+          ?? '.',
+      ),
+      requireBeadOnSpawn: (beads.require_bead_on_spawn as boolean) ?? true,
+      stuckDispatchLimit: (beads.stuck_dispatch_limit as number) ?? 10,
+      actor: (beads.actor as string) ?? 'shepherds-coordinator',
     },
   };
 }

@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { resolveConfigPath } from '../config/resolve-config.js';
 import { loadConfig, getGitToken } from '../config/index.js';
 import { loadPersonas } from '../persona/index.js';
@@ -151,6 +153,40 @@ export async function runDoctorCommand(options: DoctorCommandOptions): Promise<n
         status: 'warn',
         detail: `Not found locally: ${config.docker.image}`,
         fix: 'Run `shepherds-pi setup` to pull/build the image.',
+      });
+    }
+
+    // Beads work-graph (optional; required only when enabled)
+    if (config.beads.enabled) {
+      const version = run(config.beads.binary, ['version']);
+      if (version.ok) {
+        const detail = (version.stdout || version.stderr).trim().split('\n')[0] ?? 'bd available';
+        results.push({ name: 'Beads CLI', status: 'pass', detail });
+      } else {
+        results.push({
+          name: 'Beads CLI',
+          status: 'fail',
+          detail: version.stderr || version.error || 'bd not found',
+          fix: `Install beads (https://github.com/gastownhall/beads) and ensure \`${config.beads.binary}\` is on PATH, or set beads.binary.`,
+        });
+      }
+
+      const beadsDir = path.join(config.beads.repoPath, '.beads');
+      if (fs.existsSync(beadsDir)) {
+        results.push({ name: 'Beads database', status: 'pass', detail: beadsDir });
+      } else {
+        results.push({
+          name: 'Beads database',
+          status: 'fail',
+          detail: `Missing ${beadsDir}`,
+          fix: `Run \`cd "${config.beads.repoPath}" && bd init\` (optionally --stealth), or set beads.enabled: false.`,
+        });
+      }
+    } else {
+      results.push({
+        name: 'Beads work graph',
+        status: 'warn',
+        detail: 'Disabled (beads.enabled: false) — using free-form plan tools',
       });
     }
   }

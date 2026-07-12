@@ -207,7 +207,11 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   let agentResult: AgentResultJson | null = null;
 
   try {
-    // ─── 6. Stream stdout/stderr ───────────────────────────────
+    // ─── 6. Stream stdout/stderr (best-effort) ─────────────────
+    // Docker Desktop/Windows attach streams sometimes never emit 'end'
+    // after fast-exiting containers (alpine e2e images). Completion must
+    // follow container.wait(), with stream drain only as a short grace
+    // window so we never hang forever waiting on attach.
     const logStream = await openContainerOutputStream(container, opts.onEvent);
 
     const { PassThrough } = await import('node:stream');
@@ -215,46 +219,66 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     const stderrStream = new PassThrough();
     docker.modem.demuxStream(logStream, stdoutStream, stderrStream);
 
-    await new Promise<void>((resolve, reject) => {
-      let stdoutBuffer = '';
-      stdoutStream.on('data', (chunk: Buffer) => {
-        stdoutBuffer += chunk.toString('utf-8');
-        const lines = stdoutBuffer.split('\n');
-        stdoutBuffer = lines.pop() ?? '';
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          opts.onStdout?.(trimmed);
-          try {
-            const event = JSON.parse(trimmed);
-            events.push(event);
-            opts.onEvent?.(event);
-          } catch {
-            // Not JSON — plain log line from entrypoint, ignore
-          }
+    let stdoutBuffer = '';
+    stdoutStream.on('data', (chunk: Buffer) => {
+      stdoutBuffer += chunk.toString('utf-8');
+      const lines = stdoutBuffer.split('\n');
+      stdoutBuffer = lines.pop() ?? '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        opts.onStdout?.(trimmed);
+        try {
+          const event = JSON.parse(trimmed);
+          events.push(event);
+          opts.onEvent?.(event);
+        } catch {
+          // Not JSON — plain log line from entrypoint, ignore
         }
-      });
-
-      let stderrBuffer = '';
-      stderrStream.on('data', (chunk: Buffer) => {
-        stderrBuffer += chunk.toString('utf-8');
-        const lines = stderrBuffer.split('\n');
-        stderrBuffer = lines.pop() ?? '';
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed) {
-            opts.onEvent?.({ type: 'container_stderr', line: trimmed });
-          }
-        }
-      });
-
-      logStream.on('end', resolve);
-      logStream.on('error', reject);
+      }
     });
 
-    // ─── 7. Wait for exit ──────────────────────────────────────
+    let stderrBuffer = '';
+    stderrStream.on('data', (chunk: Buffer) => {
+      stderrBuffer += chunk.toString('utf-8');
+      const lines = stderrBuffer.split('\n');
+      stderrBuffer = lines.pop() ?? '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed) {
+          opts.onEvent?.({ type: 'container_stderr', line: trimmed });
+        }
+      }
+    });
+
+    const streamDone = new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      logStream.on('end', finish);
+      logStream.on('close', finish);
+      logStream.on('error', finish);
+      stdoutStream.on('end', finish);
+      stderrStream.on('end', finish);
+    });
+
+    // ─── 7. Wait for exit (source of truth) ───────────────────
     const waitResult = await container.wait();
     exitCode = (waitResult as unknown as { StatusCode: number }).StatusCode;
+
+    // Drain any remaining multiplexed frames briefly, then force-close.
+    await Promise.race([
+      streamDone,
+      new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+    ]);
+    try {
+      (logStream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+    } catch { /* ignore */ }
+    try { stdoutStream.destroy(); } catch { /* ignore */ }
+    try { stderrStream.destroy(); } catch { /* ignore */ }
 
     // ─── 8. Read result.json ───────────────────────────────────
     const resultPath = path.join(outputDir, 'result.json');
@@ -346,11 +370,13 @@ async function openContainerOutputStream(
   try {
     // Use live attach stream by default to avoid dependency on daemon log-driver
     // read support (`docker logs`) across environments.
+    // logs:true re-plays buffered output so a late attach (fast-exiting
+    // alpine test images with no stdout) still ends the stream instead of hanging.
     return await container.attach({
       stream: true,
       stdout: true,
       stderr: true,
-      logs: false,
+      logs: true,
     });
   } catch (attachErr: unknown) {
     const message = getDockerErrorMessage(attachErr);

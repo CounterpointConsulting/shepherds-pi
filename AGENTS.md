@@ -49,7 +49,8 @@ at `<project>/.shepherds-pi/shepherds.db` (`src/db/index.ts`,
 | `config/index.ts` | `loadConfig()`, `ShepherdsPiConfig` interfaces, `.env` loader, `${VAR}` interpolation, `getGitToken()`. |
 | `config/resolve-config.ts` | `resolveConfigPath()` — order: `--config` → `SHEPHERDS_PI_CONFIG` → walk up from CWD for `shepherds-pi.yaml`. Throws if none found. |
 | `orchestrator/coordinator.md` | The coordinator **system prompt** (principles, quality gates, retry/stuck rules, persona list). Editing this changes coordinator behavior. |
-| `orchestrator/tools.ts` | All coordinator tools (the factory `createOrchestratorTools`). Owns the worktree manager, git URL/token resolution, and the spawn lifecycle (DB updates, event emission, host-git finalize). |
+| `orchestrator/tools.ts` | All coordinator tools (the factory `createOrchestratorTools`). Owns the worktree manager, git URL/token resolution, spawn lifecycle, and optional Beads work-graph tools. |
+| `beads/` | Host-side `bd` client + tool wrappers. When `beads.enabled`, Beads is the plan of record (replaces free-form `read_plan`/`update_plan`). |
 | `agent/spawner.ts` | `spawnAgent()` runs an agent container (security-hardened); `buildDockerImage()` / `ensureImage()`. Streams stdout via container attach (fallback to `docker logs`). Parses `/output/result.json`. |
 | `agent/container-name.ts` | Funny unique container names. |
 | `extensions/shepherds/index.ts` | The `pi` extension: registers tools on `session_start`, status widget, `ask_user` UI wiring (uses `ctx.ui.input`), `/shepherd-status` command, `shepherd_set_goal` tool. |
@@ -121,6 +122,10 @@ Lives in the **target project** (not necessarily this repo). Template at
 - `git.repo_mode`: **`worktree`** | `clone`
 - `git.git_ops_mode`: **`host`** | `container`
   - Constraint: `git_ops_mode: host` REQUIRES `repo_mode: worktree`.
+- `beads.enabled` (default **false**) — coordinator work-graph via host `bd`
+  - When enabled: requires `bd` on PATH and `.beads/` in `beads.repo_path`
+  - Unregisters free-form plan tools; every spawn must pass `beadId`
+  - Design: `docs/beads-coordinator-design.md`
 
 ### Repo modes (critical)
 - **worktree (mounted)** → spawner sets `REPO_MODE=mounted`, bind-mounts a git

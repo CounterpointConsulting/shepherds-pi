@@ -37,11 +37,13 @@
     "docker:build": "tsx src/scripts/docker-build.ts",
     "sync": "node scripts/sync-to-project.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "tsx src/test/foundation.ts && tsx src/test/orchestrator.ts && tsx src/test/sanitize.ts && tsx src/test/worktree-manager.ts && tsx src/test/host-git-manager.ts",
+    "test": "tsx src/test/foundation.ts && tsx src/test/orchestrator.ts && tsx src/test/sanitize.ts && tsx src/test/worktree-manager.ts && tsx src/test/host-git-manager.ts && tsx src/test/beads-normalize.ts && tsx src/test/beads-client.ts",
     "test:agent": "tsx src/test/spawn-agent.ts",
     "test:e2e:worktree": "tsx src/test/e2e-worktree-handoffs.ts",
     "test:e2e:clone": "tsx src/test/e2e-clone-container-handoffs.ts",
-    "test:e2e": "npm run test:e2e:worktree && npm run test:e2e:clone"
+    "test:e2e:beads": "tsx src/test/e2e-beads-feature.ts",
+    "test:e2e": "npm run test:e2e:worktree && npm run test:e2e:clone",
+    "test:e2e:all": "npm run test:e2e && npm run test:e2e:beads"
   },
   "dependencies": {
     "@mariozechner/pi-coding-agent": "^0.72.1",
