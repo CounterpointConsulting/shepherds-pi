@@ -1,1 +1,1 @@
-openrouter/anthropic/claude-sonnet-4
+openrouter/x-ai/grok-4.5

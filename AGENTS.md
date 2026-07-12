@@ -72,13 +72,13 @@ Each subdir = one specialist agent. Contents: `SYSTEM.md` (required),
 
 | Persona | Model | Role |
 |---|---|---|
-| `architect` | openrouter/openai/o3 | Analyze codebase, create implementation plans |
-| `dba` | claude-sonnet-4 | DB schema design, migrations |
-| `typescript-api-dev` | claude-sonnet-4 | REST API development |
-| `typescript-react-dev` | claude-sonnet-4 | React components |
-| `code-reviewer` | gemini-2.5-pro | Code review / quality gate |
-| `web-tester` | claude-sonnet-4 | Browser testing via **playwright-skill** (mandatory) |
-| `integrator` | openrouter/openai/o3 | Branch merging / conflict resolution |
+| `architect` | openrouter/x-ai/grok-4.5 | Analyze codebase, create implementation plans |
+| `dba` | openrouter/x-ai/grok-4.5 | DB schema design, migrations |
+| `typescript-api-dev` | openrouter/x-ai/grok-4.5 | REST API development |
+| `typescript-react-dev` | openrouter/x-ai/grok-4.5 | React components |
+| `code-reviewer` | openrouter/x-ai/grok-4.5 | Code review / quality gate |
+| `web-tester` | openrouter/x-ai/grok-4.5 | Browser testing via **playwright-skill** (mandatory) |
+| `integrator` | openrouter/x-ai/grok-4.5 | Branch merging / conflict resolution |
 | `using-agent-skills` | (meta) | Shared meta-skill mounted into every agent for dynamic skill selection |
 
 `SKILL_TEMPLATE.md` is a template for authoring new skills.

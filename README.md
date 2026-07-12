@@ -82,18 +82,18 @@ shepherds-pi/
 │   ├── Dockerfile              # Agent container image (Node 20 + pi + Playwright/Chromium)
 │   └── entrypoint.sh           # Prepare repo (clone or mounted), load persona skills, run pi, optional in-container git finalize
 ├── personas/
-│   ├── architect/              # o3 — designs solutions, creates plans
-│   ├── dba/                    # claude-sonnet-4 — schemas, migrations
-│   ├── typescript-api-dev/     # claude-sonnet-4 — backend API code
-│   ├── typescript-react-dev/   # claude-sonnet-4 — frontend React code
-│   ├── code-reviewer/          # gemini-2.5-pro — reviews code quality
-│   ├── web-tester/             # claude-sonnet-4 — tests web apps via playwright (mandatory)
+│   ├── architect/              # grok-4.5 — designs solutions, creates plans
+│   ├── dba/                    # grok-4.5 — schemas, migrations
+│   ├── typescript-api-dev/     # grok-4.5 — backend API code
+│   ├── typescript-react-dev/   # grok-4.5 — frontend React code
+│   ├── code-reviewer/          # grok-4.5 — reviews code quality
+│   ├── web-tester/             # grok-4.5 — tests web apps via playwright (mandatory)
 │   │   └── skills/playwright-skill/  # bundled browser automation (no node_modules)
-│   ├── integrator/             # o3 — merges branches, resolves conflicts
+│   ├── integrator/             # grok-4.5 — merges branches, resolves conflicts
 │   ├── using-agent-skills/     # shared meta-skill for dynamic workflow skill selection
 │   └── <persona>/
 │       ├── SYSTEM.md           # Persona system prompt
-│       ├── model.txt           # Model ID (e.g., openrouter/openai/o3)
+│       ├── model.txt           # Model ID (e.g., openrouter/x-ai/grok-4.5)
 │       └── skills/*/
 │           └── SKILL.md        # Workflow skills + summarize handoff contract
 ├── src/
