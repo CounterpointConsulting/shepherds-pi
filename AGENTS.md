@@ -6,11 +6,14 @@ to get wrong.
 
 ## What this project is
 
-**Shepherds Pi** is a multi-agent software-development automation tool. A
+**Shepherds Pi** is a multi-agent product-development automation tool. A
 **coordinator** (an instance of the `pi` coding agent running with a custom
-system prompt + extension) plans work and dispatches **specialist agents**, each
-of which runs in an isolated **Docker container** to do the actual coding,
-review, testing, and merging. The coordinator never writes code itself.
+system prompt + extension) takes a product idea from conversation to a usable,
+tested release: it discovers/refines the idea with the user, agrees a plan, then
+dispatches **specialist agents** (in parallel when possible) until the release
+and remaining improvements are done. Each specialist runs in an isolated
+**Docker container** for coding, review, testing, and merging. The coordinator
+never writes code itself.
 
 - Package name: `shepherds-pi` (CLI binary `shepherds-pi`), ESM, Node >= 20.
 - Built on `@mariozechner/pi-coding-agent` (the `pi` agent harness).
@@ -48,7 +51,7 @@ at `<project>/.shepherds-pi/shepherds.db` (`src/db/index.ts`,
 | `cli.ts` | Entry point. Subcommands `init` / `doctor` / `setup`; default mode launches the coordinator `pi`. Resolves coordinator prompt + extension from `dist/` (built) or `src/` (dev). |
 | `config/index.ts` | `loadConfig()`, `ShepherdsPiConfig` interfaces, `.env` loader, `${VAR}` interpolation, `getGitToken()`. |
 | `config/resolve-config.ts` | `resolveConfigPath()` — order: `--config` → `SHEPHERDS_PI_CONFIG` → walk up from CWD for `shepherds-pi.yaml`. Throws if none found. |
-| `orchestrator/coordinator.md` | The coordinator **system prompt** (principles, quality gates, retry/stuck rules, persona list). Editing this changes coordinator behavior. |
+| `orchestrator/coordinator.md` | The coordinator **system prompt** (sole mission: discover → agree spec → plan → drive team to usable release; principles; quality gates; retry/stuck; persona list). Editing this changes coordinator behavior. |
 | `orchestrator/tools.ts` | All coordinator tools (the factory `createOrchestratorTools`). Owns the worktree manager, git URL/token resolution, spawn lifecycle, and optional Beads work-graph tools. |
 | `beads/` | Host-side `bd` client + tool wrappers. When `beads.enabled`, Beads is the plan of record (replaces free-form `read_plan`/`update_plan`). |
 | `agent/spawner.ts` | `spawnAgent()` runs an agent container (security-hardened); `buildDockerImage()` / `ensureImage()`. Streams stdout via container attach (fallback to `docker logs`). Parses `/output/result.json`. |
@@ -97,14 +100,29 @@ Each subdir = one specialist agent. Contents: `SYSTEM.md` (required),
 
 ## Coordinator behavior rules (`coordinator.md`)
 
-Key mandates currently encoded:
+The coordinator's **sole mission** (encoded in the system prompt):
+1. **Discover & refine** a product idea with the user (`ask_user`) until an
+   actionable product specification is agreed — not invent major requirements
+   in silence.
+2. **Agree a plan** (architect for non-trivial work); break the release into
+   specialist tasks with concrete success criteria.
+3. **Drive the agent team** — maximize parallelism for independent work, keep
+   review + test gates on every unit before integrate — until a **usable,
+   tested release** exists.
+4. **Do not stop early** — keep consulting architect / reviewers / testers and
+   queue improvements until no further functional or technical progress is
+   worth shipping for the goal, the user accepts done, or a stuck hard-stop needs
+   human guidance. Stuck on one task ≠ project done.
+
+Additional hard rules still encoded:
 1. **Concrete success criteria** — every task/step must have objectively
    verifiable success criteria defined at dispatch time.
 2. **Mandatory test-agent verification** — before completing any task, spawn a
    test agent to verify criteria (web → playwright). On failure, send the task
    back to the appropriate implementer for revision.
 3. **Retry cap / stuck detection** — dispatch a given task a MAX of 10 times
-   (initial + revisions). After 10, stop and `ask_user` that agents are stuck.
+   (initial + revisions). After 10, pause that task and `ask_user`; continue
+   other work toward the release where possible.
 4. Quality gates: every implementation reviewed AND tested before the integrator
    merges.
 

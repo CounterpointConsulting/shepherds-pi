@@ -1,6 +1,6 @@
 # Shepherds Pi
 
-Local CLI tool that automates software development by coordinating specialized AI agents through a coordinator persona running directly in pi. Shepherds-Pi launches pi with a coordinator system prompt and a Shepherds extension that provides orchestration tools.
+Local CLI tool that automates product development by coordinating specialized AI agents through a coordinator persona running directly in pi. The coordinator discovers and refines a product idea with you, agrees a plan, then drives specialist agents through implementation, review, and testing until a usable release is ready. Shepherds-Pi launches pi with that coordinator system prompt and a Shepherds extension that provides orchestration tools.
 
 **Everything is pi** — coordinator and UI are native pi; Shepherds contributes extension tools for spawning and managing agent containers.
 
@@ -37,13 +37,28 @@ Local CLI tool that automates software development by coordinating specialized A
 - **Agents are one-shot Docker containers** — spawned with a persona + instructions, write `/output/result.json` when done, container is removed
 - **Host-managed git supported via worktrees** — branch worktrees are prepared on host and mounted into containers
 - **All communication routed through Orchestrator** — agents never talk to each other
-- **Emergent flow** — Orchestrator reasons and decides next steps, not a rigid phase sequence
+- **Product mission, not a rigid phase machine** — discover → agree spec → plan →
+  drive specialists to a usable tested release; order/decomposition are emergent
 - **Run log as external memory** — survives context compaction, queryable via `read_run_log` tool
-- **Per-persona model selection** — o3 for planning/integration, claude-sonnet-4 for coding, gemini-2.5-pro for review
+- **Per-persona model selection** — configure via each persona's `model.txt`
 
 ### Coordinator Behavior Rules
 
-The coordinator prompt (`src/orchestrator/coordinator.md`) enforces:
+The coordinator prompt (`src/orchestrator/coordinator.md`) defines one mission
+and several hard rules.
+
+**Sole mission**
+
+1. **Discover & refine** the product idea with the user (`ask_user`) until an
+   actionable specification is agreed.
+2. **Agree a plan** (use the architect when the problem is non-trivial).
+3. **Drive the team** — spawn specialists in parallel where possible; keep
+   review + test gates before integrate.
+4. **Do not stop early** — continue until a usable, tested release exists and
+   no further shipping improvements remain (with specialist consultation), the
+   user accepts done, or a hard stuck limit needs human guidance.
+
+**Hard rules**
 
 - **Concrete success criteria** — every task/step must have objectively
   verifiable success criteria defined when the agent is dispatched.
@@ -54,8 +69,8 @@ The coordinator prompt (`src/orchestrator/coordinator.md`) enforces:
 - **Send-back on failure** — if verification fails, the task goes back to an
   agent of the appropriate type for revision with the test findings.
 - **Retry cap / stuck detection** — a given task is dispatched at most **10
-  times** (initial + revisions); after that the coordinator stops and alerts the
-  user that the agents are stuck.
+  times** (initial + revisions); after that the coordinator pauses *that* task,
+  alerts the user, and continues other work toward the release when possible.
 - **Quality gates** — every implementation is reviewed AND tested before the
   integrator merges.
 
@@ -190,7 +205,7 @@ Configuration resolution order:
 2. `SHEPHERDS_PI_CONFIG` env var
 3. nearest `shepherds-pi.yaml` by walking upward from current directory
 
-Start by describing your goal in the default pi prompt. The coordinator will plan, spawn agents, and coordinate the work using Shepherds tools.
+Start by describing a product idea in the default pi prompt. Expect the coordinator to ask clarifying questions until a manageable specification is agreed, propose a plan, then spawn specialists (in parallel when safe) and keep driving until a usable, tested release of that scope is ready.
 
 > Note: when using host-managed git mode (`git.repo_mode=worktree` + `git.git_ops_mode=host`), no in-container clone/commit/push is performed.
 
@@ -373,9 +388,9 @@ SHEPHERDS_TEST_BRANCH=shepherds-test/demo npx tsx src/test/spawn-agent.ts archit
 
 ## Known Issues / TODO
 
-- [ ] Compaction resilience — inject "call read_run_log" reminder when context is compacted
+- [ ] Compaction resilience — inject "call read_run_log" / `beads_prime` reminder when context is compacted
 - [ ] Error recovery — retry failed agents, escalate to user
 - [ ] Richer coordinator dashboard widget in pi UI (status/history drill-down)
 - [ ] Multiple goals — validate concurrent run handling and run selection ergonomics
 - [ ] Branch strategy UX — improve branch naming conventions + policy guidance for coordinator-generated branches
-- [ ] Prompt optimization — coordinator prompt may need tuning for emergent planning
+- [ ] Prompt optimization — score discover → plan → drive-to-release adherence in long runs
