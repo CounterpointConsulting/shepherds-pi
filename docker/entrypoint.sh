@@ -182,10 +182,27 @@ if [ -f "/shared-skills/using-agent-skills/SKILL.md" ]; then
 fi
 
 if [ "$GIT_OPS_MODE" = "host" ]; then
-  GIT_REMINDER="Host-managed git mode is active. Do NOT run git commands (especially commit/push) in this container. The host will finalize git operations after you complete the task."
+  GIT_REMINDER="Host-managed git mode is active. Do NOT run git commands (especially commit/push/merge/status/diff) in this container. The host will finalize all git operations after you complete the task."
+  GIT_ENV_NOTE="- Git: HOST-MANAGED. Do NOT run any git command. In particular, \`.git\` here may be a worktree pointer to a host path that does not exist in this container, so \`git status\`, \`git diff\`, \`git merge\`, \`git log\`, etc. will fail or mislead. Just read/edit/create files in the working tree; the host commits, pushes, and merges for you. To see what changed, compare files directly (e.g. \`rg\`, reading files) instead of \`git diff\`."
 else
   GIT_REMINDER="Then commit and push any code changes to the current branch with an appropriate commit message."
+  GIT_ENV_NOTE="- Git: CONTAINER-MANAGED. You own git in this container. Commit and push your changes to the current branch when done. A credential helper is preconfigured; do not embed tokens in URLs."
 fi
+
+# Standing environment brief, injected once for every persona so agents do not
+# waste tool calls rediscovering the sandbox. Keep this factual and current with
+# docker/Dockerfile.
+ENV_BRIEF="RUNTIME ENVIRONMENT (read before exploring — this is your sandbox):
+- OS: Debian 12 (bookworm) Linux container, non-root user (uid 1000). You ARE the sandbox; it is disposable.
+- Working directory: your repository is at /workspace/repo (this is your CWD). Do your work there.
+- Filesystem: rootfs is READ-ONLY. Writable paths are /workspace (your repo + scratch), /tmp, and /home/node/.pi. Do NOT try to write elsewhere (e.g. global npm installs, /usr, /etc) — it will fail. Prefer project-local installs.
+- Runtimes/tools already installed globally (do NOT reinstall): node 20, npm, npx, pnpm 9 (\`pnpm\`), yarn 1 (\`yarn\`), git, ripgrep (\`rg\` — prefer over grep/find for search), jq, curl, psql (postgresql-client), and Playwright + Chromium (browsers at /ms-playwright). Project-local dev tools (e.g. tsx, vite, tsc) come from the repo's own dependencies after install — run them via your package manager scripts or \`npx\`/\`pnpm exec\`, not global installs.
+- Network: available for package installs. No OpenAI/vendor keys are present unless explicitly provided; design/verify against mock providers when a key is absent.
+- Display: HEADLESS only. Browser automation (Playwright) must run headless; there is no interactive display.
+${GIT_ENV_NOTE}
+- Package manager: this project uses pnpm (see pnpm-workspace.yaml / packageManager field). Use \`pnpm\` for install/scripts unless the repo clearly uses npm or yarn."
+
+PI_ARGS+=("--append-system-prompt" "$ENV_BRIEF")
 
 SUMMARIZE_REMINDER="IMPORTANT: When you have completed your task (or cannot make further progress), you MUST write /output/result.json using the write tool.
 
