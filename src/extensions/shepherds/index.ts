@@ -80,7 +80,14 @@ export default function shepherdsExtension(pi: ExtensionAPI): void {
           }
 
           if (event.type === 'agent_event') {
-            const inner = (event as { event?: { type?: string; line?: string } }).event;
+            const inner = (event as { event?: { type?: string; line?: string; branch?: string } }).event;
+            if (inner?.type === 'worktree_waiting') {
+              ctx.ui.notify(
+                `Waiting for branch "${String(inner.branch ?? '?')}" to free up (held by another agent)`,
+                'warning',
+              );
+              return;
+            }
             if (inner?.type === 'container_stderr' && typeof inner.line === 'string') {
               // Only forward likely-error lines to avoid flooding the UI.
               const line = inner.line;

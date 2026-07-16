@@ -32,7 +32,7 @@ export function createOrchestratorTools(deps: {
       repoPath: config.project.repoPath,
       worktreesDir: config.git.worktreesDir,
       resetBeforeRun: config.git.resetWorktreeBeforeRun,
-      acquireStepTimeoutMs: 90_000,
+      acquireStepTimeoutMs: config.git.acquireStepTimeoutMs,
     })
     : null;
 
@@ -169,19 +169,59 @@ async function resolveGitToken(config: ShepherdsPiConfig): Promise<string> {
   return getGitToken(config.agent.gitTokenEnv);
 }
 
+// How long a spawn will wait for a busy branch lease before giving up is
+// configurable via git.lease_wait_timeout_seconds / git.lease_wait_poll_seconds.
+// Same-branch contention is normal (review/test gates run after the implementer
+// on the same branch), so we queue instead of failing immediately.
+function isBranchInUseError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /already in use by lease|is locked by lease/i.test(msg);
+}
+
 async function acquireWorktreeLease(
   worktreeManager: WorktreeManager | null,
   config: ShepherdsPiConfig,
   branch: string,
   agentId: string,
+  onWaiting?: (info: { branch: string; waitedMs: number; error: string }) => void,
 ): Promise<WorktreeLease | null> {
   if (config.git.repoMode !== 'worktree') return null;
   if (!worktreeManager) throw new Error('Worktree mode enabled, but no worktree manager is configured.');
-  return worktreeManager.acquire({
-    branch,
-    baseBranch: config.project.devBranch,
-    agentId,
-  });
+
+  const timeoutMs = config.git.leaseWaitTimeoutMs;
+  const pollMs = config.git.leaseWaitPollMs;
+  const startedAt = Date.now();
+  let notified = false;
+
+  for (;;) {
+    try {
+      return await worktreeManager.acquire({
+        branch,
+        baseBranch: config.project.devBranch,
+        agentId,
+      });
+    } catch (err: unknown) {
+      const waitedMs = Date.now() - startedAt;
+      // Only wait/retry for branch-in-use contention; other errors (git failures,
+      // timeouts) are surfaced immediately. A timeout of 0 disables waiting.
+      if (!isBranchInUseError(err) || waitedMs >= timeoutMs) {
+        if (isBranchInUseError(err)) {
+          const base = err instanceof Error ? err.message : String(err);
+          throw new Error(
+            `${base}. Waited ${Math.round(waitedMs / 1000)}s for branch "${branch}" to free up ` +
+            `before giving up (timeout ${Math.round(timeoutMs / 1000)}s). ` +
+            `Another agent is holding this branch — serialize work on it or dispatch to a different branch.`,
+          );
+        }
+        throw err;
+      }
+      if (!notified) {
+        notified = true;
+        onWaiting?.({ branch, waitedMs, error: err instanceof Error ? err.message : String(err) });
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  }
 }
 
 type HostGitFinalizeOutcome = Awaited<ReturnType<typeof finalizeAgentChanges>>;
@@ -336,7 +376,19 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
       });
     }
 
-    lease = await acquireWorktreeLease(worktreeManager, config, branchName, agentId);
+    lease = await acquireWorktreeLease(worktreeManager, config, branchName, agentId, (info) => {
+      db.appendLog(
+        runId,
+        'agent_worktree_waiting',
+        { agentId, branch: info.branch, error: info.error },
+        `Waiting for branch "${info.branch}" to free up for ${agentId}: ${info.error}`,
+      );
+      eventBus?.emit({
+        type: 'agent_event',
+        agentId,
+        event: { type: 'worktree_waiting', branch: info.branch, error: info.error },
+      });
+    });
     if (lease) {
       db.appendLog(
         runId,

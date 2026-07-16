@@ -31,6 +31,11 @@ git:
   author_name: Shepherds Pi Agent
   author_email: agent@shepherds-pi.dev
   reset_worktree_before_run: true
+  # Worktree branch-lease tuning (worktree mode). A branch maps to one worktree,
+  # so only one agent can hold a branch at a time; contending spawns wait.
+  lease_wait_timeout_seconds: 900   # max wait for a busy branch before failing (0 = fail fast)
+  lease_wait_poll_seconds: 3        # poll interval while waiting
+  acquire_step_timeout_seconds: 90  # per-step timeout for git ops during acquire
 
 # Beads work-graph integration (default off until enabled per project)
 beads:

@@ -309,6 +309,9 @@ echo "e2e-agent-done:$SUMMARY"
         authorName: 'Shepherds Pi Agent',
         authorEmail: 'agent@shepherds-pi.dev',
         resetWorktreeBeforeRun: true,
+        leaseWaitTimeoutMs: 900_000,
+        leaseWaitPollMs: 3_000,
+        acquireStepTimeoutMs: 90_000,
       },
       beads: {
         enabled: true,

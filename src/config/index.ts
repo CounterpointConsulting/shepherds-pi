@@ -39,6 +39,12 @@ export interface GitConfig {
   authorName: string;
   authorEmail: string;
   resetWorktreeBeforeRun: boolean;
+  /** Max time (ms) to wait for a busy branch lease before failing the spawn. */
+  leaseWaitTimeoutMs: number;
+  /** Poll interval (ms) while waiting for a busy branch lease to free up. */
+  leaseWaitPollMs: number;
+  /** Per-step timeout (ms) for long-running git ops during worktree acquire. */
+  acquireStepTimeoutMs: number;
 }
 
 export interface BeadsConfig {
@@ -167,6 +173,9 @@ export function loadConfig(configPath: string): ShepherdsPiConfig {
       authorName: (git.author_name as string) ?? 'Shepherds Pi Agent',
       authorEmail: (git.author_email as string) ?? 'agent@shepherds-pi.dev',
       resetWorktreeBeforeRun: (git.reset_worktree_before_run as boolean) ?? true,
+      leaseWaitTimeoutMs: Math.max(0, (git.lease_wait_timeout_seconds as number) ?? 900) * 1000,
+      leaseWaitPollMs: Math.max(500, ((git.lease_wait_poll_seconds as number) ?? 3) * 1000),
+      acquireStepTimeoutMs: Math.max(1000, ((git.acquire_step_timeout_seconds as number) ?? 90) * 1000),
     },
     beads: {
       enabled: (beads.enabled as boolean) ?? false,
