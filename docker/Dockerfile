@@ -2,13 +2,26 @@ FROM node:20-bookworm
 
 # System dependencies
 # jq replaces python3 for the JSON fallback in entrypoint.sh (much smaller image)
+# ripgrep (rg) gives agents fast code search.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     jq \
     postgresql-client \
     curl \
     ca-certificates \
+    ripgrep \
     && rm -rf /var/lib/apt/lists/*
+
+# Enable corepack and pre-provision Node 20-compatible pnpm/yarn so they work
+# at runtime under the read-only rootfs (lazy provisioning would need to write
+# to the corepack cache, which is not writable at run time). pnpm 11+ requires
+# Node 22+, so we pin pnpm 9.x for the Node 20 base.
+ENV COREPACK_HOME=/opt/corepack
+RUN corepack enable \
+    && mkdir -p /opt/corepack \
+    && corepack prepare pnpm@9.15.9 --activate \
+    && corepack prepare yarn@1.22.22 --activate \
+    && chmod -R a+rX /opt/corepack
 
 # Install pi coding agent globally
 RUN npm install -g @mariozechner/pi-coding-agent
