@@ -69,6 +69,26 @@ export default function shepherdsExtension(pi: ExtensionAPI): void {
         emit: (event) => {
           if (event.type === 'user_question' && typeof event.question === 'string') {
             ctx.ui.notify(`Coordinator asks: ${event.question}`, 'info');
+            return;
+          }
+
+          // Surface agent container diagnostics so spawn failures are visible.
+          if (event.type === 'agent_failed') {
+            const err = typeof event.error === 'string' ? event.error : 'unknown error';
+            ctx.ui.notify(`Agent failed (${String(event.agentId ?? '?')}):\n${err}`, 'error');
+            return;
+          }
+
+          if (event.type === 'agent_event') {
+            const inner = (event as { event?: { type?: string; line?: string } }).event;
+            if (inner?.type === 'container_stderr' && typeof inner.line === 'string') {
+              // Only forward likely-error lines to avoid flooding the UI.
+              const line = inner.line;
+              if (/error|fail|not set|missing|no such|cannot|denied|refused/i.test(line)) {
+                ctx.ui.notify(`[container] ${line}`, 'warning');
+              }
+            }
+            return;
           }
         },
         askUser: async (question: string): Promise<string> => {
@@ -91,6 +111,11 @@ export default function shepherdsExtension(pi: ExtensionAPI): void {
     pi.setActiveTools(Array.from(active));
 
     ctx.ui.notify(`Shepherds extension loaded (${toolNames.length} tools)`, 'info');
+    ctx.ui.notify(
+      `config: ${process.env.SHEPHERDS_PI_CONFIG ?? '(discovered)'} | ` +
+      `repo_mode=${s.config.git.repoMode} git_ops_mode=${s.config.git.gitOpsMode} image=${s.config.docker.image}`,
+      s.config.git.repoMode === 'clone' ? 'warning' : 'info',
+    );
     refreshStatusWidget(ctx);
   });
 

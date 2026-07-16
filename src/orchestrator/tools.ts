@@ -392,9 +392,16 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
     });
 
     let status: 'done' | 'failed' = spawnResult.exitCode === 0 ? 'done' : 'failed';
+    const stderrTail = spawnResult.stderr.slice(-15).join('\n');
     let failReason = spawnResult.timedOut
       ? `Timed out after ${config.agent.timeoutMinutes} minutes`
       : `Exit code ${spawnResult.exitCode}`;
+    if (status === 'failed' && stderrTail) {
+      failReason += `\nContainer stderr (last lines):\n${stderrTail}`;
+    }
+    if (status === 'failed' && spawnResult.workspaceDir) {
+      failReason += `\nWorkspace preserved for inspection: ${spawnResult.workspaceDir}`;
+    }
 
     let hostGit: HostGitFinalizeOutcome | null = null;
 
@@ -543,9 +550,17 @@ function createSpawnAgentTool(
       }
 
       const { agentId, spawnResult, status, hostGit } = outcome;
-      const resultText = spawnResult.result
-        ? JSON.stringify(spawnResult.result, null, 2)
-        : `Agent ${spawnResult.timedOut ? 'timed out' : `exited with code ${spawnResult.exitCode}`}. No structured result was produced.`;
+      let resultText: string;
+      if (spawnResult.result) {
+        resultText = JSON.stringify(spawnResult.result, null, 2);
+      } else {
+        const stderrTail = spawnResult.stderr.slice(-20).join('\n');
+        resultText =
+          `Agent ${spawnResult.timedOut ? 'timed out' : `exited with code ${spawnResult.exitCode}`}. ` +
+          `No structured result was produced.` +
+          (stderrTail ? `\n\nContainer stderr (last lines):\n${stderrTail}` : '') +
+          (spawnResult.workspaceDir ? `\n\nWorkspace preserved for inspection: ${spawnResult.workspaceDir}` : '');
+      }
 
       return {
         content: [{ type: 'text' as const, text: resultText }],

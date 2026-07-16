@@ -33,6 +33,14 @@ export interface SpawnResult {
   events: Record<string, unknown>[];
   timedOut: boolean;
   containerName: string;
+  /** Captured stderr lines from the container (entrypoint diagnostics, pi errors). */
+  stderr: string[];
+  /**
+   * Host path to the agent workspace (instructions, context, /output). Deleted on
+   * success; preserved on non-zero exit (or when SHEPHERDS_PI_KEEP_WORKSPACE=1)
+   * so failures can be inspected. Null once cleaned up.
+   */
+  workspaceDir: string | null;
 }
 
 export interface AgentResultJson {
@@ -78,6 +86,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
   // ─── 1. Temp workspace on host ───────────────────────────────
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shepherds-pi-agent-'));
+  // Set in the finally block when the workspace is preserved for debugging.
+  let workspaceDir: string | null = null;
   const instructionsFile = path.join(tmpDir, 'instructions.txt');
   const contextFile = path.join(tmpDir, 'context.txt');
   const outputDir = path.join(tmpDir, 'output');
@@ -203,6 +213,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   opts.signal?.addEventListener('abort', abortHandler, { once: true });
 
   const events: Record<string, unknown>[] = [];
+  const stderrLines: string[] = [];
   let exitCode = -1;
   let agentResult: AgentResultJson | null = null;
 
@@ -246,6 +257,7 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
       for (const line of lines) {
         const trimmed = line.trim();
         if (trimmed) {
+          stderrLines.push(trimmed);
           opts.onEvent?.({ type: 'container_stderr', line: trimmed });
         }
       }
@@ -302,14 +314,26 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
 
     // Best-effort overwrite of secret files before removing the tmpdir
     // (defence in depth against tmpfs-swap disclosure on old kernels).
+    // Always scrub secrets, even when we keep the workspace for debugging.
     try {
       const zeros = Buffer.alloc(256, 0);
       if (fs.existsSync(gitTokenFile)) fs.writeFileSync(gitTokenFile, zeros);
       if (fs.existsSync(openrouterKeyFile)) fs.writeFileSync(openrouterKeyFile, zeros);
+      fs.rmSync(secretsDir, { recursive: true, force: true });
     } catch { /* ignore */ }
-    try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    } catch { /* ignore */ }
+
+    // Preserve the workspace (instructions/context/output/events.jsonl) when the
+    // agent failed, so the caller can inspect why. Opt into always-keep via
+    // SHEPHERDS_PI_KEEP_WORKSPACE=1.
+    const keepWorkspace =
+      process.env.SHEPHERDS_PI_KEEP_WORKSPACE === '1' || exitCode !== 0;
+    if (keepWorkspace) {
+      workspaceDir = tmpDir;
+    } else {
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      } catch { /* ignore */ }
+    }
   }
 
   return {
@@ -318,6 +342,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     events,
     timedOut,
     containerName,
+    stderr: stderrLines,
+    workspaceDir,
   };
 }
 
