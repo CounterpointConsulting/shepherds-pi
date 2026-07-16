@@ -110,6 +110,9 @@ record** for goals and tasks. Do not maintain markdown TODO lists or free-form
 - **Review / test:** close only with verification evidence. Self-report from
   the implementer is never enough to close a test bead.
 - **Integrate:** only after review and test beads for the unit are closed.
+  Integrate by calling the `merge_branch` tool (host-side merge), NOT by
+  spawning an integrator agent. Close the integrate bead only after
+  `merge_branch` reports the merge landed.
 - Spawn **never** auto-closes beads; you must call `beads_close`.
 
 ### Success criteria
@@ -134,6 +137,22 @@ record** for goals and tasks. Do not maintain markdown TODO lists or free-form
 - Do NOT instruct agents to run git commit/push in host-managed mode.
 - The host runtime finalizes commit/push after agent completion.
 
+## Integration / Merging (use the `merge_branch` tool)
+
+- To integrate a feature branch, call `merge_branch({ source, target })`
+  (target defaults to the dev branch). This is host git plumbing: it does a
+  `--no-ff` merge in an ephemeral integration worktree, and on clean merges
+  commits + pushes automatically. You NEVER run git or touch the filesystem.
+- On conflicts, `merge_branch` automatically spawns the **integrator** persona
+  as a conflict resolver (it edits files only; the host does all git), then
+  finalizes. You do not orchestrate that loop yourself.
+- If `merge_branch` reports it could not resolve conflicts after its retries,
+  it returns the remaining conflicted files. Then either `ask_user` for
+  guidance or re-dispatch with more specific integration instructions.
+- Only call `merge_branch` after the unit's review AND test gates have passed.
+- Do NOT spawn a bare `integrator` agent to "merge" — that agent cannot run git
+  in host mode. Merging is exclusively the `merge_branch` tool's job.
+
 ## Context Management
 
 - The run log is your external memory for **this run** — call read_run_log
@@ -145,7 +164,8 @@ record** for goals and tasks. Do not maintain markdown TODO lists or free-form
 - When spawning a reviewer, include the original task description and
   the branch to review
 - When spawning a tester, include the spec/requirements being tested
-- When spawning an integrator, specify which branches to merge into dev
+- To integrate, call `merge_branch({ source, target })` (do not spawn an
+  integrator agent for merging — the tool handles conflict resolution itself)
 
 ## Available Personas
 
@@ -155,13 +175,15 @@ record** for goals and tasks. Do not maintain markdown TODO lists or free-form
 - **typescript-react-dev** — React component development
 - **code-reviewer** — Code review, quality gate
 - **web-tester** — Browser-based testing via the playwright skill. When dispatching, pass `requestedSkills: playwright-skill` and the task's success criteria.
-- **integrator** — Branch merging and conflict resolution
+- **integrator** — Conflict resolver used automatically by `merge_branch` when
+  a host merge hits conflicts (edits files only; never runs git). You do not
+  normally spawn this persona directly.
 
 ## Quality Gates
 
 - Every implementation MUST be reviewed before merging
 - Every implementation MUST pass testing before merging
-- The integrator merges only after review and test both pass
+- Merge (via `merge_branch`) only after review and test both pass
 
 ## Task Completion & Verification (MANDATORY)
 

@@ -7,6 +7,7 @@ import { loadPersona } from '../persona/index.js';
 import { spawnAgent } from '../agent/spawner.js';
 import { WorktreeManager, type WorktreeLease } from '../git/worktree-manager.js';
 import { finalizeAgentChanges } from '../git/host-git-manager.js';
+import { attemptMerge, finalizeMerge, cleanupIntegrationWorktree } from '../git/host-merge-manager.js';
 import { BeadsClient } from '../beads/client.js';
 import { createBeadsTools, prepareBeadForSpawn } from '../beads/tools.js';
 import simpleGit from 'simple-git';
@@ -51,6 +52,7 @@ export function createOrchestratorTools(deps: {
     createBranchTool(eventBus, config),
     listBranchesTool(config),
     getBranchDiffTool(config),
+    mergeBranchTool(eventBus, db, config, getRunId),
   ];
 
   // Beads mode: work graph is the plan of record — do not dual-write free-form plan JSON.
@@ -111,6 +113,11 @@ const CreateBranchParams = Type.Object({
 const GetBranchDiffParams = Type.Object({
   branch: Type.String({ description: 'Feature branch' }),
   base: Type.Optional(Type.String({ description: 'Base branch', default: 'dev' })),
+});
+
+const MergeBranchParams = Type.Object({
+  source: Type.String({ description: 'Feature branch to merge (e.g. "feat/s1-monorepo-skeleton")' }),
+  target: Type.Optional(Type.String({ description: 'Target branch to merge into (default: dev branch)' })),
 });
 
 const UpdatePlanParams = Type.Object({
@@ -812,6 +819,222 @@ function getBranchDiffTool(config: ShepherdsPiConfig): ToolDefinition<typeof Get
           content: [{ type: 'text' as const, text: `Error getting diff: ${message}` }],
           details: { error: true } as unknown as Record<string, unknown>,
         };
+      }
+    },
+  });
+}
+
+// ─── merge_branch ────────────────────────────────────────────────
+
+// How many times to spawn the integrator resolver on a single conflicted merge
+// before giving up and reporting to the coordinator.
+const MAX_CONFLICT_RESOLVE_ATTEMPTS = 3;
+
+/**
+ * Spawn the integrator persona against an EXISTING integration worktree that
+ * still contains conflict markers, and have it write resolved file contents.
+ * The agent only edits files; the host performs all git. Returns the raw spawn
+ * result so callers can inspect exit/status.
+ */
+async function spawnConflictResolver(args: {
+  db: ShepherdsDB;
+  config: ShepherdsPiConfig;
+  runId: string;
+  worktreePath: string;
+  source: string;
+  target: string;
+  conflictedFiles: string[];
+  attempt: number;
+}): Promise<{ ok: boolean; agentId: string; error?: string }> {
+  const { db, config, runId, worktreePath, source, target, conflictedFiles, attempt } = args;
+
+  const persona = loadPersona('integrator', `${config.personasDir}/integrator`);
+  if (!persona) {
+    return { ok: false, agentId: 'integrator-missing', error: 'integrator persona not found' };
+  }
+
+  const agentId = `integrator-resolve-${crypto.randomUUID().substring(0, 8)}`;
+  const fileList = conflictedFiles.map((f) => `  - ${f}`).join('\n');
+  const instructions =
+    `A host-side merge of branch "${source}" into "${target}" hit conflicts. You are working ` +
+    `directly in the integration worktree at /workspace/repo, which contains the in-progress ` +
+    `merge with conflict markers.\n\n` +
+    `Resolve ALL merge conflicts by editing these files so they contain the correct, coherent ` +
+    `merged result (no <<<<<<<, =======, >>>>>>> markers left):\n${fileList}\n\n` +
+    `Rules:\n` +
+    `- Preserve intent from BOTH sides; prefer the feature branch ("${source}") when changes ` +
+    `overlap, unless that clearly breaks other work on "${target}".\n` +
+    `- Do NOT run any git command (host-managed git: .git here is a host worktree pointer and ` +
+    `git will fail). Just edit the files.\n` +
+    `- Do NOT add new features; only reconcile the conflict.\n` +
+    `- When done, ensure the project still builds/typechecks if quick to verify.\n` +
+    `Write /output/result.json summarizing what you reconciled.`;
+
+  const context =
+    `Conflict resolution attempt ${attempt} of ${MAX_CONFLICT_RESOLVE_ATTEMPTS}. ` +
+    `Integration worktree is a detached checkout at the tip of "${target}" with "${source}" ` +
+    `being merged in. Only the listed files are conflicted.`;
+
+  db.createAgentRun({
+    id: agentId,
+    run_id: runId,
+    step_id: null,
+    persona: persona.name,
+    model: persona.model,
+    instructions,
+    context,
+    branch: target,
+    container_id: null,
+    status: 'spawning',
+    result: null,
+    started_at: new Date().toISOString(),
+    completed_at: null,
+  });
+  db.appendLog(runId, 'merge_conflict_resolve_spawned', { agentId, source, target, conflictedFiles }, `Spawned conflict resolver ${agentId} for ${source} -> ${target}`);
+
+  try {
+    // Mount the integration worktree directly (host-managed git so no in-container
+    // git ops, no token needed). This bypasses the lease manager on purpose: the
+    // worktree already exists and is owned by this merge operation.
+    const gitToken = await resolveGitToken(config);
+    const spawnResult = await spawnAgent({
+      agentId,
+      persona,
+      instructions,
+      context,
+      branch: target,
+      repoMode: 'worktree',
+      gitOpsMode: 'host',
+      worktreePath,
+      gitToken,
+      config,
+    });
+    const status = spawnResult.exitCode === 0 ? 'done' : 'failed';
+    db.updateAgentStatus(agentId, status, spawnResult.result ? JSON.stringify(spawnResult.result) : undefined);
+    if (status === 'failed') {
+      return { ok: false, agentId, error: `resolver exited with code ${spawnResult.exitCode}` };
+    }
+    return { ok: true, agentId };
+  } catch (err: unknown) {
+    db.updateAgentStatus(agentId, 'failed');
+    return { ok: false, agentId, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+function mergeBranchTool(
+  eventBus: OrchestratorEventBusLike | undefined,
+  db: ShepherdsDB,
+  config: ShepherdsPiConfig,
+  getRunId: () => string,
+): ToolDefinition<typeof MergeBranchParams> {
+  return defineTool({
+    name: 'merge_branch',
+    label: 'Merge Branch',
+    description:
+      'Integrate a feature branch into a target branch (default: dev) on the HOST. ' +
+      'Performs a --no-ff merge in an ephemeral integration worktree; clean merges are ' +
+      'committed and pushed automatically. On conflicts, an integrator agent is spawned ' +
+      'to resolve them (it edits files; the host does all git), then the merge is finalized. ' +
+      'The coordinator never touches the filesystem — this tool owns all git operations.',
+    parameters: MergeBranchParams,
+    promptSnippet: 'Merge a reviewed+tested feature branch into the integration branch',
+    async execute(_toolCallId, params) {
+      const runId = getRunId();
+      const source = params.source;
+      const target = params.target ?? config.project.devBranch;
+
+      if (config.git.repoMode !== 'worktree') {
+        return {
+          content: [{ type: 'text' as const, text: 'merge_branch requires git.repo_mode=worktree (host-managed integration).' }],
+          details: { error: true } as unknown as Record<string, unknown>,
+        };
+      }
+
+      db.appendLog(runId, 'merge_started', { source, target }, `Merging ${source} -> ${target}`);
+      eventBus?.emit({ type: 'merge_started', source, target });
+
+      const attempt = await attemptMerge({
+        repoPath: config.project.repoPath,
+        worktreesDir: config.git.worktreesDir,
+        source,
+        target,
+        authorName: config.git.authorName,
+        authorEmail: config.git.authorEmail,
+        noFf: true,
+      });
+
+      if (attempt.status === 'clean' || attempt.status === 'up-to-date') {
+        const msg = attempt.status === 'clean'
+          ? `Merged ${source} into ${target} (${attempt.commitSha.slice(0, 8)}) and pushed.`
+          : `${target} already contains ${source}; nothing to merge.`;
+        db.appendLog(runId, 'merge_completed', { source, target, status: attempt.status }, msg);
+        eventBus?.emit({ type: 'merge_completed', source, target, status: attempt.status });
+        return { content: [{ type: 'text' as const, text: msg }], details: { source, target, status: attempt.status } as Record<string, unknown> };
+      }
+
+      if (attempt.status === 'error') {
+        const msg = `Merge of ${source} into ${target} failed: ${attempt.message}`;
+        db.appendLog(runId, 'merge_failed', { source, target, message: attempt.message }, msg);
+        eventBus?.emit({ type: 'merge_failed', source, target, error: attempt.message });
+        return { content: [{ type: 'text' as const, text: msg }], details: { error: true, source, target } as unknown as Record<string, unknown> };
+      }
+
+      // ─── Conflict path: spawn resolver agent(s), then finalize on host ───
+      const worktreePath = attempt.worktreePath;
+      let conflictedFiles = attempt.conflictedFiles;
+      db.appendLog(runId, 'merge_conflict', { source, target, conflictedFiles }, `Merge ${source} -> ${target} has ${conflictedFiles.length} conflicted file(s)`);
+      eventBus?.emit({ type: 'merge_conflict', source, target, conflictedFiles });
+
+      try {
+        for (let attemptNo = 1; attemptNo <= MAX_CONFLICT_RESOLVE_ATTEMPTS; attemptNo++) {
+          const resolver = await spawnConflictResolver({
+            db, config, runId, worktreePath, source, target, conflictedFiles, attempt: attemptNo,
+          });
+          if (!resolver.ok) {
+            db.appendLog(runId, 'merge_conflict_resolve_failed', { attempt: attemptNo, error: resolver.error }, `Resolver attempt ${attemptNo} failed: ${resolver.error}`);
+            continue;
+          }
+
+          const fin = await finalizeMerge({
+            repoPath: config.project.repoPath,
+            worktreePath,
+            source,
+            target,
+            authorName: config.git.authorName,
+            authorEmail: config.git.authorEmail,
+          });
+
+          if (fin.status === 'clean') {
+            const msg = `Merged ${source} into ${target} after resolving conflicts (${fin.commitSha.slice(0, 8)}) and pushed.`;
+            db.appendLog(runId, 'merge_completed', { source, target, status: 'resolved', attempts: attemptNo }, msg);
+            eventBus?.emit({ type: 'merge_completed', source, target, status: 'resolved' });
+            return { content: [{ type: 'text' as const, text: msg }], details: { source, target, status: 'resolved', attempts: attemptNo } as Record<string, unknown> };
+          }
+
+          if (fin.status === 'unresolved') {
+            conflictedFiles = fin.remainingMarkers;
+            db.appendLog(runId, 'merge_conflict_unresolved', { attempt: attemptNo, remaining: fin.remainingMarkers }, `Resolver attempt ${attemptNo} left markers in ${fin.remainingMarkers.length} file(s)`);
+            continue;
+          }
+
+          // finalize error
+          const msg = `Merge finalize of ${source} into ${target} failed: ${fin.message}`;
+          db.appendLog(runId, 'merge_failed', { source, target, message: fin.message }, msg);
+          eventBus?.emit({ type: 'merge_failed', source, target, error: fin.message });
+          return { content: [{ type: 'text' as const, text: msg }], details: { error: true, source, target } as unknown as Record<string, unknown> };
+        }
+
+        // Exhausted attempts — leave nothing behind, report to coordinator.
+        const msg =
+          `Could not automatically merge ${source} into ${target} after ${MAX_CONFLICT_RESOLVE_ATTEMPTS} ` +
+          `resolver attempts. Remaining conflicted files:\n${conflictedFiles.map((f) => `  - ${f}`).join('\n')}\n` +
+          `Ask the user how to proceed, or dispatch a fresh integrator with more specific guidance.`;
+        db.appendLog(runId, 'merge_failed', { source, target, conflictedFiles, exhausted: true }, `Merge ${source} -> ${target} unresolved after ${MAX_CONFLICT_RESOLVE_ATTEMPTS} attempts`);
+        eventBus?.emit({ type: 'merge_failed', source, target, error: 'unresolved conflicts' });
+        return { content: [{ type: 'text' as const, text: msg }], details: { error: true, source, target, conflictedFiles } as unknown as Record<string, unknown> };
+      } finally {
+        // Always clean up the ephemeral integration worktree.
+        await cleanupIntegrationWorktree(config.project.repoPath, worktreePath);
       }
     },
   });

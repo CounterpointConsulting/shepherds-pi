@@ -110,7 +110,7 @@ const tools = createOrchestratorTools({
 
 const expectedTools = [
   'spawn_agent', 'spawn_agents', 'create_branch', 'list_branches',
-  'get_branch_diff', 'read_plan', 'update_plan', 'read_run_log',
+  'get_branch_diff', 'merge_branch', 'read_plan', 'update_plan', 'read_run_log',
   'ask_user', 'update_goal_status',
 ];
 

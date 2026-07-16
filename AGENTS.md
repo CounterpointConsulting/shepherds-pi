@@ -30,8 +30,8 @@ shepherds-pi (CLI)
             │
             ├─ Coordinator LLM uses orchestrator TOOLS (src/orchestrator/tools.ts):
             │     spawn_agent / spawn_agents, create_branch, list_branches,
-            │     get_branch_diff, read_plan/update_plan, read_run_log,
-            │     ask_user, update_goal_status, shepherd_set_goal
+            │     get_branch_diff, merge_branch, read_plan/update_plan,
+            │     read_run_log, ask_user, update_goal_status, shepherd_set_goal
             │
             └─ spawn_agent → spawnAgent() (src/agent/spawner.ts)
                    └─ docker run  shepherds-pi-agent  image
@@ -59,7 +59,8 @@ at `<project>/.shepherds-pi/shepherds.db` (`src/db/index.ts`,
 | `extensions/shepherds/index.ts` | The `pi` extension: registers tools on `session_start`, status widget, `ask_user` UI wiring (uses `ctx.ui.input`), `/shepherd-status` command, `shepherd_set_goal` tool. |
 | `persona/index.ts` | `loadPersona` / `loadPersonas` — reads `SYSTEM.md`, `model.txt`, `skills/`, `tools.json` from a persona dir. |
 | `git/worktree-manager.ts` | Worktree mode: per-branch git worktrees under `worktrees_dir`, file-lock leases, reset-before-run. |
-| `git/host-git-manager.ts` | Host-managed git: `finalizeAgentChanges()` commits/pushes after an agent finishes (used when `git_ops_mode: host`). |
+| `git/host-git-manager.ts` | Host-managed git: `finalizeAgentChanges()` commits/pushes an agent's own file changes to its own branch after it finishes (used when `git_ops_mode: host`). Does NOT do cross-branch merges. |
+| `git/host-merge-manager.ts` | Host-side branch integration for the `merge_branch` tool: `--no-ff` merge in an ephemeral detached worktree under `worktrees_dir/.integration/`; clean merges auto commit+push; conflicts leave the worktree for a resolver agent, then `finalizeMerge()` commits+pushes. Always cleans up the integration worktree. |
 | `db/index.ts` | SQLite schema + accessors (runs, plans, agent_runs, run_log, messages). |
 | `commands/{init,doctor,setup}.ts` | `init` scaffolds config/env/personas into a target project; `doctor` validates prereqs; `setup` pulls/builds the agent image. |
 | `scripts/docker-build.ts` | `npm run docker:build` wrapper around `buildDockerImage()`. |
@@ -157,6 +158,21 @@ Lives in the **target project** (not necessarily this repo). Template at
   `finalizeAgentChanges()` after the agent completes. Entrypoint is told NOT to
   run git in-container.
 - **container** → the agent commits/pushes inside the container (needs token).
+
+### Integration / merging (`merge_branch` tool)
+- Cross-branch merges are **host git plumbing**, never done by the coordinator
+  or an agent directly (agents can't run git in host mode — `.git` is a host
+  worktree pointer). The coordinator calls the `merge_branch` tool.
+- `merge_branch` (src/git/host-merge-manager.ts): `--no-ff` merge of
+  `origin/<source>` into `origin/<target>` inside an ephemeral **detached**
+  worktree under `worktrees_dir/.integration/`. Clean merges auto commit+push.
+- On conflict it spawns the **integrator** persona as a resolver: the agent
+  edits the conflicted files only (host does all git), then `finalizeMerge()`
+  verifies no markers remain, commits the merge, pushes, and cleans up. Retries
+  up to `MAX_CONFLICT_RESOLVE_ATTEMPTS` (3), else reports remaining conflicts.
+- Gotcha baked into the code: `simple-git` does NOT throw on a merge *conflict*
+  (only on hard errors), so the manager always inspects `status.conflicted`
+  after the merge call rather than relying on catch.
 
 ## Docker agent container
 
