@@ -60,6 +60,25 @@ const MIGRATIONS = [
 
     INSERT INTO schema_version VALUES (1);
   `,
+  // Migration 2: per-agent LLM usage totals + full transcript archive
+  `
+    ALTER TABLE agent_runs ADD COLUMN tokens_input   INTEGER;
+    ALTER TABLE agent_runs ADD COLUMN tokens_output  INTEGER;
+    ALTER TABLE agent_runs ADD COLUMN tokens_total   INTEGER;
+    ALTER TABLE agent_runs ADD COLUMN cost_usd        REAL;
+    ALTER TABLE agent_runs ADD COLUMN assistant_turns INTEGER;
+    ALTER TABLE agent_runs ADD COLUMN usage_by_model  TEXT;
+
+    CREATE TABLE IF NOT EXISTS agent_transcripts (
+      agent_id    TEXT PRIMARY KEY REFERENCES agent_runs(id),
+      run_id      TEXT NOT NULL REFERENCES runs(id),
+      transcript  TEXT NOT NULL,
+      event_count INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT DEFAULT (datetime('now'))
+    );
+
+    INSERT INTO schema_version VALUES (2);
+  `,
 ];
 
 export class ShepherdsDB {
@@ -159,6 +178,36 @@ export class ShepherdsDB {
     return this.db.prepare('SELECT * FROM agent_runs WHERE run_id = ? ORDER BY started_at').all(runId) as DbAgentRun[];
   }
 
+  /** Persist per-agent LLM usage totals (Layer 1). */
+  saveAgentUsage(id: string, usage: {
+    tokensInput: number;
+    tokensOutput: number;
+    tokensTotal: number;
+    costUsd: number;
+    assistantTurns: number;
+    byModel: Record<string, unknown>;
+  }): void {
+    this.db.prepare(
+      `UPDATE agent_runs SET tokens_input = ?, tokens_output = ?, tokens_total = ?,
+         cost_usd = ?, assistant_turns = ?, usage_by_model = ? WHERE id = ?`
+    ).run(
+      usage.tokensInput, usage.tokensOutput, usage.tokensTotal,
+      usage.costUsd, usage.assistantTurns, JSON.stringify(usage.byModel), id,
+    );
+  }
+
+  /** Archive the full agent transcript (raw events.jsonl). */
+  saveAgentTranscript(agentId: string, runId: string, transcript: string, eventCount: number): void {
+    this.db.prepare(
+      `INSERT OR REPLACE INTO agent_transcripts (agent_id, run_id, transcript, event_count)
+       VALUES (?, ?, ?, ?)`
+    ).run(agentId, runId, transcript, eventCount);
+  }
+
+  getAgentTranscript(agentId: string): DbAgentTranscript | undefined {
+    return this.db.prepare('SELECT * FROM agent_transcripts WHERE agent_id = ?').get(agentId) as DbAgentTranscript | undefined;
+  }
+
   // ─── Run Log ───────────────────────────────────────────────────
 
   appendLog(runId: string, eventType: string, payload: Record<string, unknown>, summary: string): void {
@@ -227,6 +276,22 @@ export interface DbAgentRun {
   result: string | null;
   started_at: string;
   completed_at: string | null;
+  // Usage columns (added in migration 2) are populated post-run via
+  // saveAgentUsage(), so they are optional on insert.
+  tokens_input?: number | null;
+  tokens_output?: number | null;
+  tokens_total?: number | null;
+  cost_usd?: number | null;
+  assistant_turns?: number | null;
+  usage_by_model?: string | null;
+}
+
+export interface DbAgentTranscript {
+  agent_id: string;
+  run_id: string;
+  transcript: string;
+  event_count: number;
+  created_at: string;
 }
 
 export interface DbRunLogEntry {

@@ -450,6 +450,24 @@ async function executeAgentRun(spec: ExecuteAgentSpec): Promise<ExecuteAgentResu
       },
     });
 
+    // Persist LLM usage totals + full transcript (Layer 1) regardless of outcome.
+    try {
+      db.saveAgentUsage(agentId, {
+        tokensInput: spawnResult.usage.inputTokens,
+        tokensOutput: spawnResult.usage.outputTokens,
+        tokensTotal: spawnResult.usage.totalTokens,
+        costUsd: spawnResult.usage.costUsd,
+        assistantTurns: spawnResult.usage.assistantTurns,
+        byModel: spawnResult.usage.byModel,
+      });
+      if (spawnResult.transcript) {
+        const eventCount = spawnResult.transcript.split('\n').filter((l) => l.trim()).length;
+        db.saveAgentTranscript(agentId, runId, spawnResult.transcript, eventCount);
+      }
+    } catch {
+      /* non-fatal: usage/transcript persistence must never fail a run */
+    }
+
     let status: 'done' | 'failed' = spawnResult.exitCode === 0 ? 'done' : 'failed';
     const stderrTail = spawnResult.stderr.slice(-15).join('\n');
     let failReason = spawnResult.timedOut
@@ -909,6 +927,21 @@ async function spawnConflictResolver(args: {
       gitToken,
       config,
     });
+    try {
+      db.saveAgentUsage(agentId, {
+        tokensInput: spawnResult.usage.inputTokens,
+        tokensOutput: spawnResult.usage.outputTokens,
+        tokensTotal: spawnResult.usage.totalTokens,
+        costUsd: spawnResult.usage.costUsd,
+        assistantTurns: spawnResult.usage.assistantTurns,
+        byModel: spawnResult.usage.byModel,
+      });
+      if (spawnResult.transcript) {
+        const eventCount = spawnResult.transcript.split('\n').filter((l) => l.trim()).length;
+        db.saveAgentTranscript(agentId, runId, spawnResult.transcript, eventCount);
+      }
+    } catch { /* non-fatal */ }
+
     const status = spawnResult.exitCode === 0 ? 'done' : 'failed';
     db.updateAgentStatus(agentId, status, spawnResult.result ? JSON.stringify(spawnResult.result) : undefined);
     if (status === 'failed') {

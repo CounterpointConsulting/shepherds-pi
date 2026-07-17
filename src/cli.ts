@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { runInitCommand } from './commands/init.js';
 import { runDoctorCommand } from './commands/doctor.js';
 import { runSetupCommand } from './commands/setup.js';
+import { runHistoryCommand } from './commands/history.js';
 import { loadConfig } from './config/index.js';
 import { resolveConfigPath } from './config/resolve-config.js';
 import { getModuleDir } from './utils.js';
@@ -27,6 +28,13 @@ interface RuntimeArgs {
 interface InitArgs extends CommonArgs {
   force: boolean;
   noPersonas: boolean;
+}
+
+interface HistoryArgs extends CommonArgs {
+  runId?: string;
+  json: boolean;
+  costOnly: boolean;
+  transcripts: boolean;
 }
 
 async function main(): Promise<void> {
@@ -86,6 +94,33 @@ async function main(): Promise<void> {
 
     process.exitCode = await runDoctorCommand({
       configPath: parsed.configPath,
+    });
+    return;
+  }
+
+  if (first === 'history') {
+    const parsed = parseHistoryArgs(argv.slice(1));
+    if (parsed.version) {
+      console.log(getVersion());
+      return;
+    }
+    if (parsed.help) {
+      printHistoryUsage();
+      return;
+    }
+    if (parsed.unknown.length > 0) {
+      console.error(`Unknown history args: ${parsed.unknown.join(' ')}`);
+      printHistoryUsage();
+      process.exitCode = 1;
+      return;
+    }
+
+    process.exitCode = await runHistoryCommand({
+      configPath: parsed.configPath,
+      runId: parsed.runId,
+      json: parsed.json,
+      costOnly: parsed.costOnly,
+      transcripts: parsed.transcripts,
     });
     return;
   }
@@ -326,6 +361,41 @@ function parseInitArgs(args: string[]): InitArgs {
   };
 }
 
+function parseHistoryArgs(args: string[]): HistoryArgs {
+  let configPath: string | undefined;
+  let help = false;
+  let version = false;
+  let runId: string | undefined;
+  let json = false;
+  let costOnly = false;
+  let transcripts = false;
+  const unknown: string[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+
+    if (arg === '--config' || arg === '-c') {
+      const value = args[i + 1];
+      if (!value) { unknown.push(arg); } else { configPath = value; i += 1; }
+      continue;
+    }
+    if (arg === '--run' || arg === '-r') {
+      const value = args[i + 1];
+      if (!value) { unknown.push(arg); } else { runId = value; i += 1; }
+      continue;
+    }
+    if (arg === '--json') { json = true; continue; }
+    if (arg === '--cost') { costOnly = true; continue; }
+    if (arg === '--transcripts') { transcripts = true; continue; }
+    if (arg === '--help' || arg === '-h') { help = true; continue; }
+    if (arg === '--version' || arg === '-v') { version = true; continue; }
+
+    unknown.push(arg);
+  }
+
+  return { configPath, help, version, runId, json, costOnly, transcripts, unknown };
+}
+
 function getVersion(): string {
   try {
     const packageJsonPath = path.resolve(getModuleDir(import.meta.url), '../package.json');
@@ -338,7 +408,7 @@ function getVersion(): string {
 }
 
 function printUsage(): void {
-  console.log(`Shepherds Pi\n\nUsage:\n  shepherds-pi [--config <path>] [pi args...]\n  shepherds-pi init [--force] [--no-personas]\n  shepherds-pi doctor [--config <path>]\n  shepherds-pi setup [--config <path>]\n  shepherds-pi --help\n  shepherds-pi --version\n\nDefault mode:\n  Launches pi with the Shepherds coordinator system prompt and the\n  Shepherds orchestration extension tools enabled. Any extra args are\n  passed through to pi.\n\nCommands:\n  init      Scaffold shepherds-pi.yaml, .env.example, and default personas\n  doctor    Validate prerequisites and configuration\n  setup     Pull/build the configured Docker agent image\n\nConfig resolution order:\n  1) --config <path>\n  2) SHEPHERDS_PI_CONFIG env var\n  3) nearest shepherds-pi.yaml by walking up from CWD\n`);
+  console.log(`Shepherds Pi\n\nUsage:\n  shepherds-pi [--config <path>] [pi args...]\n  shepherds-pi init [--force] [--no-personas]\n  shepherds-pi doctor [--config <path>]\n  shepherds-pi setup [--config <path>]\n  shepherds-pi history [--run <id>] [--cost] [--json] [--transcripts]\n  shepherds-pi --help\n  shepherds-pi --version\n\nDefault mode:\n  Launches pi with the Shepherds coordinator system prompt and the\n  Shepherds orchestration extension tools enabled. Any extra args are\n  passed through to pi.\n\nCommands:\n  init      Scaffold shepherds-pi.yaml, .env.example, and default personas\n  doctor    Validate prerequisites and configuration\n  setup     Pull/build the configured Docker agent image\n  history   Review development history + LLM token/cost usage\n\nConfig resolution order:\n  1) --config <path>\n  2) SHEPHERDS_PI_CONFIG env var\n  3) nearest shepherds-pi.yaml by walking up from CWD\n`);
 }
 
 function printInitUsage(): void {
@@ -351,6 +421,10 @@ function printDoctorUsage(): void {
 
 function printSetupUsage(): void {
   console.log(`Usage: shepherds-pi setup [--config <path>]`);
+}
+
+function printHistoryUsage(): void {
+  console.log(`Usage: shepherds-pi history [options]\n\nReview a project's development history and LLM usage/cost.\n\nOptions:\n  --run, -r <id>   Show only the given run id (default: all runs)\n  --cost           Show only the usage/cost rollup (skip per-agent table)\n  --transcripts    Note archived transcript size per agent\n  --json           Emit machine-readable JSON\n  --config, -c <p> Path to shepherds-pi.yaml\n`);
 }
 
 main().catch((err: unknown) => {

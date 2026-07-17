@@ -6,6 +6,7 @@ import type { PersonaConfig } from '../persona/index.js';
 import type { ShepherdsPiConfig, RepoMode, GitOpsMode } from '../config/index.js';
 import { getModuleDir } from '../utils.js';
 import { generateFunnyContainerName } from './container-name.js';
+import { computeUsageFromJsonl, type AgentUsageTotals } from './usage.js';
 
 export interface SpawnOptions {
   agentId: string;
@@ -41,6 +42,13 @@ export interface SpawnResult {
    * so failures can be inspected. Null once cleaned up.
    */
   workspaceDir: string | null;
+  /**
+   * Full raw agent transcript (contents of /output/events.jsonl, LF-framed JSON
+   * lines). Empty string if the agent produced no event stream.
+   */
+  transcript: string;
+  /** Aggregated LLM token/cost usage parsed from the transcript. */
+  usage: AgentUsageTotals;
 }
 
 export interface AgentResultJson {
@@ -216,6 +224,17 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
   const stderrLines: string[] = [];
   let exitCode = -1;
   let agentResult: AgentResultJson | null = null;
+  let transcript = '';
+  let usage: AgentUsageTotals = {
+    assistantTurns: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 0,
+    costUsd: 0,
+    byModel: {},
+  };
 
   try {
     // ─── 6. Stream stdout/stderr (best-effort) ─────────────────
@@ -303,6 +322,27 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
         // Invalid JSON — reported via result being null
       }
     }
+
+    // ─── 8b. Capture full transcript + usage (before cleanup) ──
+    // The entrypoint tees pi's JSON event stream to /output/events.jsonl.
+    // We archive it verbatim and derive token/cost totals from it.
+    const eventsPath = path.join(outputDir, 'events.jsonl');
+    if (fs.existsSync(eventsPath)) {
+      try {
+        transcript = fs.readFileSync(eventsPath, 'utf-8');
+        usage = computeUsageFromJsonl(transcript);
+      } catch {
+        // Fall back to the parsed stdout events if the file is unreadable.
+      }
+    }
+    if (!transcript && events.length > 0) {
+      transcript = events.map((e) => JSON.stringify(e)).join('\n');
+    }
+    if (usage.assistantTurns === 0 && events.length > 0) {
+      // computeUsageFromJsonl found nothing (e.g. no file) — try parsed events.
+      const { computeUsageFromEvents } = await import('./usage.js');
+      usage = computeUsageFromEvents(events);
+    }
   } finally {
     // ─── 9. Cleanup — always runs, even on stream errors or abort ──
     clearTimeout(timeoutHandle);
@@ -344,6 +384,8 @@ export async function spawnAgent(opts: SpawnOptions): Promise<SpawnResult> {
     containerName,
     stderr: stderrLines,
     workspaceDir,
+    transcript,
+    usage,
   };
 }
 

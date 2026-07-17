@@ -61,8 +61,11 @@ at `<project>/.shepherds-pi/shepherds.db` (`src/db/index.ts`,
 | `git/worktree-manager.ts` | Worktree mode: per-branch git worktrees under `worktrees_dir`, file-lock leases, reset-before-run. |
 | `git/host-git-manager.ts` | Host-managed git: `finalizeAgentChanges()` commits/pushes an agent's own file changes to its own branch after it finishes (used when `git_ops_mode: host`). Does NOT do cross-branch merges. |
 | `git/host-merge-manager.ts` | Host-side branch integration for the `merge_branch` tool: `--no-ff` merge in an ephemeral detached worktree under `worktrees_dir/.integration/`; clean merges auto commit+push; conflicts leave the worktree for a resolver agent, then `finalizeMerge()` commits+pushes. Always cleans up the integration worktree. |
-| `db/index.ts` | SQLite schema + accessors (runs, plans, agent_runs, run_log, messages). |
+| `db/index.ts` | SQLite schema + migrations + accessors (runs, plans, agent_runs, run_log, messages, agent_transcripts). Migration 2 adds per-agent usage columns + the transcript archive. |
+| `agent/usage.ts` | Parses per-agent LLM token/cost usage from the pi JSON event stream (sums `usage` from `message_end` assistant turns only; start/update events would double-count). |
+| `commands/history.ts` | `shepherds-pi history` — dev-history + LLM usage/cost review (per-agent table, by-model/by-persona rollups, `--run`/`--cost`/`--json`/`--transcripts`). |
 | `commands/{init,doctor,setup}.ts` | `init` scaffolds config/env/personas into a target project; `doctor` validates prereqs; `setup` pulls/builds the agent image. |
+| `commands/history.ts` | `history` subcommand (see above). |
 | `scripts/docker-build.ts` | `npm run docker:build` wrapper around `buildDockerImage()`. |
 | `test/*.ts` | Foundation, orchestrator, sanitize, worktree-manager, host-git-manager, and e2e handoff tests (run via `tsx`). |
 
@@ -239,6 +242,21 @@ npm run typecheck
 ```
 
 `scripts/copy-assets.mjs` copies `src/orchestrator/coordinator.md` → `dist/...`.
+
+### Development history + LLM usage tracking
+- Every agent run's full transcript (raw pi `events.jsonl`) is archived in the
+  `agent_transcripts` table, and token/cost totals are summed into `agent_runs`
+  usage columns (`tokens_input/output/total`, `cost_usd`, `assistant_turns`,
+  `usage_by_model`). Capture happens in `spawnAgent()` before workspace cleanup
+  and is persisted by `executeAgentRun()` + the merge conflict-resolver path.
+- Review it with `shepherds-pi history` (all runs) / `--run <id>` / `--cost`
+  (rollup only) / `--json` / `--transcripts`.
+- Usage is summed ONLY from `message_end` assistant events (see `agent/usage.ts`)
+  — `message_start`/`message_update` also carry `usage` and would double-count.
+- Coordinator (host pi) usage is NOT yet captured — only sub-agents. Its
+  conversation lives in pi's own session store, not `shepherds.db`.
+- Duplicate line format from a fresh install: migrations are additive; a fresh
+  DB runs migration 1 then 2, an existing v1 DB just runs migration 2.
 **After editing `coordinator.md`, run `npm run build` (or at least copy-assets).**
 
 ## Conventions & gotchas
