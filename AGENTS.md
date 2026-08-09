@@ -16,7 +16,7 @@ and remaining improvements are done. Each specialist runs in an isolated
 never writes code itself.
 
 - Package name: `shepherds-pi` (CLI binary `shepherds-pi`), ESM, Node >= 20.
-- Built on `@mariozechner/pi-coding-agent` (the `pi` agent harness).
+- Built on `@earendil-works/pi-coding-agent` (the `pi` agent harness).
 - Repo remote: `github.com/CounterpointConsulting/shepherds-pi`.
 
 ## High-level architecture

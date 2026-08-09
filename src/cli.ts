@@ -174,7 +174,7 @@ async function runCoordinatorPi(configPathArg: string | undefined, passthrough: 
   const moduleDir = getModuleDir(import.meta.url);
   const packageRoot = path.resolve(moduleDir, '..');
   const preferDistAssets = path.basename(moduleDir) === 'dist';
-  const piCliPath = path.join(packageRoot, 'node_modules', '@mariozechner', 'pi-coding-agent', 'dist', 'cli.js');
+  const piCliPath = path.join(packageRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'cli.js');
 
   if (!fs.existsSync(piCliPath)) {
     throw new Error(`Could not find pi CLI at ${piCliPath}`);

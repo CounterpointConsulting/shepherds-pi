@@ -1,5 +1,5 @@
 import { Type } from 'typebox';
-import { defineTool, type ToolDefinition } from '@mariozechner/pi-coding-agent';
+import { defineTool, type ToolDefinition } from '@earendil-works/pi-coding-agent';
 import type { ShepherdsDB } from '../db/index.js';
 import type { ShepherdsPiConfig } from '../config/index.js';
 import { getGitToken } from '../config/index.js';

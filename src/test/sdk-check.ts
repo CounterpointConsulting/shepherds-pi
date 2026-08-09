@@ -1,6 +1,6 @@
-import { createAgentSession, AuthStorage, ModelRegistry, SessionManager, defineTool } from '@mariozechner/pi-coding-agent';
+import { createAgentSession, ModelRegistry, SessionManager, defineTool, readStoredCredential } from '@earendil-works/pi-coding-agent';
 console.log('createAgentSession:', typeof createAgentSession);
-console.log('AuthStorage:', typeof AuthStorage);
+console.log('readStoredCredential:', typeof readStoredCredential);
 console.log('ModelRegistry:', typeof ModelRegistry);
 console.log('SessionManager:', typeof SessionManager);
 console.log('defineTool:', typeof defineTool);

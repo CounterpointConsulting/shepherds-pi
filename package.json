@@ -46,7 +46,7 @@
     "test:e2e:all": "npm run test:e2e && npm run test:e2e:beads"
   },
   "dependencies": {
-    "@mariozechner/pi-coding-agent": "^0.72.1",
+    "@earendil-works/pi-coding-agent": "^0.84.1",
     "better-sqlite3": "^12.9.0",
     "dockerode": "^5.0.0",
     "js-yaml": "^4.1.1",

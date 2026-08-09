@@ -24,7 +24,7 @@ RUN corepack enable \
     && chmod -R a+rX /opt/corepack
 
 # Install pi coding agent globally
-RUN npm install -g @mariozechner/pi-coding-agent
+RUN npm install -g @earendil-works/pi-coding-agent
 
 # Verify pi is installed
 RUN pi --version
